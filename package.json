@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Organizador de pastoral escolar con IA local (offline)",
   "main": "main.js",
-  "author": "Pastoral",
+  "author": "Manuel Guia",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
@@ -13,6 +13,7 @@
   "build": {
     "appId": "com.pastoral.organizador",
     "productName": "Organizador Pastoral",
+    "copyright": "Copyright © 2026 Manuel Guia",
     "directories": {
       "output": "dist",
       "buildResources": "build"
