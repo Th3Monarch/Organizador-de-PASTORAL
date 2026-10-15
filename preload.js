@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('pastoral', {
   load: () => ipcRenderer.invoke('data:load'),
   save: (data) => ipcRenderer.invoke('data:save', data),
   dataPath: () => ipcRenderer.invoke('data:path'),
+  appVersion: () => ipcRenderer.invoke('app:version'),
   revealData: () => ipcRenderer.invoke('data:reveal'),
   exportBackup: (data) => ipcRenderer.invoke('data:export', data),
 

@@ -801,6 +801,7 @@ async function renderSettings() {
   $('#set-school').value = state.settings.schoolName || '';
   $('#set-theme').value = state.settings.theme || 'light';
   try { $('#set-datapath').textContent = await api.dataPath(); } catch (e) { /* noop */ }
+  try { $('#set-version').textContent = 'Versión ' + await api.appVersion(); } catch (e) { /* noop */ }
   await refreshAiManager();
   const st = $('#set-ai-state');
   if (aiMgr.running && (aiMgr.models || []).length) { st.className = 'pill ok'; st.textContent = 'Lista · ' + aiMgr.models.length + ' modelo(s)'; }

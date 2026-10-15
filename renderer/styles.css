@@ -65,6 +65,8 @@ html, body {
 }
 .ai-badge.online { background: rgba(47,174,107,.16); color: #57d694; }
 .ai-badge.offline { background: rgba(224,75,75,.14); color: #ff8a8a; }
+.credit { font-size: 11px; text-align: center; margin: 10px 0 0; color: #8b95a8; }
+.about-credit { margin: 6px 0; font-size: 14px; }
 
 /* CONTENT */
 .content { flex: 1; overflow-y: auto; padding: 28px 32px 60px; }

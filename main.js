@@ -149,6 +149,7 @@ app.whenReady().then(() => {
   ipcMain.handle('data:load', () => readData());
   ipcMain.handle('data:save', (_evt, data) => writeData(data));
   ipcMain.handle('data:path', () => dataFilePath);
+  ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('data:reveal', () => {
     shell.showItemInFolder(dataFilePath);
     return true;
