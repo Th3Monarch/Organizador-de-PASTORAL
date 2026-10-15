@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <title>Organizador Pastoral</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">✝</div>
+        <div class="brand-text">
+          <strong>Organizador Pastoral</strong>
+          <span id="brand-school">Pastoral Escolar</span>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="dashboard"><span class="ico">🏠</span> Inicio</button>
+        <button class="nav-item" data-view="notes"><span class="ico">💡</span> Ideas y notas</button>
+        <button class="nav-item" data-view="events"><span class="ico">📅</span> Eventos</button>
+        <button class="nav-item" data-view="tasks"><span class="ico">✅</span> Tareas</button>
+        <button class="nav-item" data-view="community"><span class="ico">👥</span> Comunidad</button>
+        <button class="nav-item" data-view="assistant"><span class="ico">🤖</span> Asistente IA</button>
+        <button class="nav-item" data-view="settings"><span class="ico">⚙️</span> Ajustes</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="ai-badge" class="ai-badge offline">● IA desconectada</div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <!-- DASHBOARD -->
+      <section class="view" id="view-dashboard">
+        <header class="view-head">
+          <div>
+            <h1 id="greeting">Buenos días</h1>
+            <p class="muted">Resumen de tu labor pastoral</p>
+          </div>
+          <button class="btn primary" id="quick-add">+ Nueva idea rápida</button>
+        </header>
+        <div id="dash-reminders" class="reminders hidden"></div>
+        <div class="stats" id="stats"></div>
+
+        <div class="card ai-examples" id="dash-ai">
+          <div class="card-head">
+            <h2>🤖 Cómo usar el asistente IA</h2>
+            <button class="link" data-goto="assistant">Abrir asistente</button>
+          </div>
+          <p class="muted">Escríbele en el chat o pulsa un ejemplo. La IA puede <strong>crear ideas, eventos, tareas, grupos y personas</strong> por ti, y te preguntará los datos que falten. También conoce lo que ya tienes en la app.</p>
+          <div class="example-list">
+            <button class="example" data-example="Tengo una idea: hacer una campaña solidaria en noviembre. Agrégala como idea con la etiqueta campaña.">
+              <span class="ex-ico">💡</span>
+              <span class="ex-text"><strong>Crear una idea</strong><em>"Tengo una idea: campaña solidaria en noviembre. Agrégala como idea."</em></span>
+            </button>
+            <button class="example" data-example="Crea un evento: retiro espiritual para 4to año.">
+              <span class="ex-ico">📅</span>
+              <span class="ex-text"><strong>Agendar un evento</strong><em>"Crea un evento: retiro espiritual para 4to año."</em></span>
+            </button>
+            <button class="example" data-example="Añade una tarea: preparar la oración de la reunión, prioridad alta, para el viernes.">
+              <span class="ex-ico">✅</span>
+              <span class="ex-text"><strong>Añadir una tarea</strong><em>"Añade una tarea: preparar la oración, prioridad alta, para el viernes."</em></span>
+            </button>
+            <button class="example" data-example="Crea el grupo Pastoral Juvenil, coordinado por Marta.">
+              <span class="ex-ico">👥</span>
+              <span class="ex-text"><strong>Crear un grupo</strong><em>"Crea el grupo Pastoral Juvenil, coordinado por Marta."</em></span>
+            </button>
+            <button class="example" data-example="Registra a Ana Torres como catequista del grupo Juvenil.">
+              <span class="ex-ico">🙋</span>
+              <span class="ex-text"><strong>Registrar una persona</strong><em>"Registra a Ana Torres como catequista del grupo Juvenil."</em></span>
+            </button>
+            <button class="example" data-example="¿Qué tareas tengo pendientes y qué eventos tengo próximos?">
+              <span class="ex-ico">❓</span>
+              <span class="ex-text"><strong>Preguntar por tus datos</strong><em>"¿Qué tareas tengo pendientes y qué eventos tengo próximos?"</em></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head">
+              <h2>Próximos eventos</h2>
+              <button class="link" data-goto="events">Ver todos</button>
+            </div>
+            <div id="dash-events" class="list"></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h2>Tareas pendientes</h2>
+              <button class="link" data-goto="tasks">Ver todas</button>
+            </div>
+            <div id="dash-tasks" class="list"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Últimas ideas</h2>
+            <button class="link" data-goto="notes">Ver todas</button>
+          </div>
+          <div id="dash-notes" class="list"></div>
+        </div>
+      </section>
+
+      <!-- NOTES -->
+      <section class="view hidden" id="view-notes">
+        <header class="view-head">
+          <div><h1>Ideas y notas</h1><p class="muted">Captura reflexiones, ideas y borradores</p></div>
+          <div class="head-actions">
+            <select id="note-template" class="small" title="Empezar con una plantilla">
+              <option value="">Plantilla…</option>
+              <option value="meeting">Nota de reunión</option>
+              <option value="person">Ficha de persona</option>
+              <option value="acta">Acta</option>
+              <option value="retreat">Planificación de retiro</option>
+            </select>
+            <button class="btn primary" data-new="note">+ Nueva nota</button>
+          </div>
+        </header>
+        <div class="toolbar">
+          <input type="search" id="notes-search" placeholder="Buscar en notas..." />
+          <select id="notes-tag"><option value="">Todas las etiquetas</option></select>
+        </div>
+        <div id="notes-grid" class="cards"></div>
+      </section>
+
+      <!-- EVENTS -->
+      <section class="view hidden" id="view-events">
+        <header class="view-head">
+          <div><h1>Eventos</h1><p class="muted">Agenda de actividades pastorales</p></div>
+          <button class="btn primary" data-new="event">+ Nuevo evento</button>
+        </header>
+        <div class="toolbar">
+          <button class="btn" id="cal-prev">‹</button>
+          <strong id="cal-title"></strong>
+          <button class="btn" id="cal-next">›</button>
+          <button class="btn" id="cal-today">Hoy</button>
+          <span class="spacer"></span>
+          <button class="btn" id="events-ics" title="Exportar a Google/Outlook Calendar">Exportar .ics</button>
+          <button class="btn" id="events-print" title="Imprimir o guardar como PDF">PDF</button>
+          <input type="search" id="events-search" placeholder="Buscar evento..." />
+        </div>
+        <div class="card cal-card">
+          <div class="cal-weekdays">
+            <span>Lun</span><span>Mar</span><span>Mié</span><span>Jue</span><span>Vie</span><span>Sáb</span><span>Dom</span>
+          </div>
+          <div id="calendar" class="calendar"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2 id="events-day-title">Eventos del día</h2></div>
+          <div id="events-day" class="list"></div>
+        </div>
+      </section>
+
+      <!-- TASKS -->
+      <section class="view hidden" id="view-tasks">
+        <header class="view-head">
+          <div><h1>Tareas pendientes</h1><p class="muted">Organiza tus pendientes</p></div>
+          <button class="btn primary" data-new="task">+ Nueva tarea</button>
+        </header>
+        <div class="toolbar">
+          <div class="segmented" id="task-filter">
+            <button class="seg active" data-f="all">Todas</button>
+            <button class="seg" data-f="pending">Pendientes</button>
+            <button class="seg" data-f="done">Completadas</button>
+          </div>
+          <span class="spacer"></span>
+          <input type="search" id="tasks-search" placeholder="Buscar tarea..." />
+        </div>
+        <div id="tasks-list" class="list"></div>
+      </section>
+
+      <!-- COMMUNITY -->
+      <section class="view hidden" id="view-community">
+        <header class="view-head">
+          <div><h1>Comunidad</h1><p class="muted">Grupos y personas de la pastoral</p></div>
+          <div class="head-actions">
+            <button class="btn" data-new="group">+ Grupo</button>
+            <button class="btn primary" data-new="person">+ Persona</button>
+          </div>
+        </header>
+        <h2 class="sub">Grupos</h2>
+        <div id="groups-grid" class="cards"></div>
+        <h2 class="sub">Personas</h2>
+        <div id="persons-grid" class="cards"></div>
+      </section>
+
+      <!-- ASSISTANT -->
+      <section class="view hidden" id="view-assistant">
+        <header class="view-head">
+          <div><h1>Asistente IA</h1><p class="muted">Funciona sin internet, directo en tu computadora</p></div>
+          <div class="head-actions">
+            <span id="ai-chip" class="pill">Comprobando...</span>
+            <select id="chat-model" class="small"></select>
+            <button class="btn" id="chat-clear">Limpiar</button>
+          </div>
+        </header>
+
+        <div class="card setup-card hidden" id="ai-setup">
+          <h2>Activa tu asistente de IA</h2>
+          <p class="muted">Se descarga una sola vez. Después funciona sin internet. La descarga puede tardar según tu conexión.</p>
+          <div class="setup-step" id="step-engine">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <strong>Motor de IA</strong>
+              <span class="muted" id="step-engine-desc">Pendiente</span>
+              <div class="bar hidden" id="bar-engine"><div class="bar-fill"></div></div>
+            </div>
+            <button class="btn primary" id="btn-install">Instalar</button>
+          </div>
+          <div class="setup-step" id="step-model">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <strong>Modelo de lenguaje</strong>
+              <select id="model-choice">
+                <option value="llama3.2:1b">Llama 3.2 1B — ligero (~1.3 GB)</option>
+                <option value="llama3.2" selected>Llama 3.2 3B — recomendado (~2 GB)</option>
+                <option value="qwen2.5:1.5b">Qwen 2.5 1.5B — ligero (~1 GB)</option>
+                <option value="qwen2.5:3b">Qwen 2.5 3B — buena calidad (~1.9 GB)</option>
+              </select>
+              <div class="bar hidden" id="bar-model"><div class="bar-fill"></div></div>
+            </div>
+            <button class="btn primary" id="btn-pull">Descargar</button>
+          </div>
+          <div class="muted" id="ai-progress-text" style="margin-top:12px"></div>
+        </div>
+
+        <div class="chat hidden" id="chat-box">
+          <div id="chat-log" class="chat-log"></div>
+          <div class="chat-suggest" id="chat-suggest">
+            <button data-prompt="Ayúdame a planificar una jornada de pastoral para secundaria.">Planificar jornada</button>
+            <button data-prompt="Redacta una oración para iniciar una reunión de pastoral.">Escribir oración</button>
+            <button data-prompt="Sugiere 5 ideas para una campaña solidaria del colegio.">Ideas de campaña</button>
+            <button data-prompt="¿Cómo organizo un retiro espiritual para alumnos de 4to año?">Organizar retiro</button>
+            <button data-prompt="Tengo una idea: hacer una campaña solidaria en noviembre. Agrégala como idea con la etiqueta campaña.">➕ Añadir idea</button>
+            <button data-prompt="Crea un evento: retiro espiritual para 4to año.">➕ Añadir evento</button>
+            <button data-prompt="Añade una tarea: preparar la oración de la reunión, prioridad alta, para el viernes.">➕ Añadir tarea</button>
+            <button data-prompt="Muéstrame mis tareas pendientes y próximos eventos.">📋 Mis pendientes</button>
+            <button data-summary="week">🗓 Resumen de la semana</button>
+          </div>
+          <form class="chat-input" id="chat-form">
+            <textarea id="chat-text" rows="1" placeholder="Escribe tu mensaje... (Enter para enviar)"></textarea>
+            <button class="btn primary" type="submit" id="chat-send">Enviar</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view hidden" id="view-settings">
+        <header class="view-head"><div><h1>Ajustes</h1><p class="muted">Configuración general y de IA local</p></div></header>
+        <div class="card">
+          <h2>Datos personales</h2>
+          <label class="field"><span>Tu nombre</span><input id="set-pastor" placeholder="Ej: María González" /></label>
+          <label class="field"><span>Nombre del colegio</span><input id="set-school" placeholder="Ej: Colegio San José" /></label>
+          <label class="field"><span>Apariencia</span>
+            <select id="set-theme">
+              <option value="light">Claro</option>
+              <option value="dark">Oscuro</option>
+            </select>
+          </label>
+        </div>
+        <div class="card">
+          <h2>IA local</h2>
+          <p class="muted">La app descarga y administra su propia IA. No necesitas instalar nada aparte. Todo funciona sin internet una vez descargado.</p>
+          <div class="row" style="margin-top:6px">
+            <span id="set-ai-state" class="pill">Comprobando...</span>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn primary" id="set-ai-install">Instalar / Reparar IA</button>
+            <button class="btn" id="set-ai-start">Iniciar</button>
+            <button class="btn" id="set-ai-stop">Detener</button>
+            <button class="btn danger" id="set-ai-uninstall">Desinstalar IA</button>
+          </div>
+          <p class="muted" id="set-ai-dir" style="margin-top:12px"></p>
+        </div>
+        <div class="card">
+          <h2>Datos y respaldo</h2>
+          <p class="muted" id="set-datapath"></p>
+          <div class="row">
+            <button class="btn" id="set-reveal">Abrir carpeta de datos</button>
+            <button class="btn" id="set-export">Exportar respaldo</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Copias de seguridad</h2>
+          <p class="muted">La app guarda una copia automática al día (se conservan las últimas 30). Puedes restaurar cualquiera.</p>
+          <div class="row" style="margin:10px 0">
+            <button class="btn" id="backup-create">Crear copia ahora</button>
+            <button class="btn" id="backup-reveal">Abrir carpeta</button>
+          </div>
+          <div id="backup-list" class="list"></div>
+        </div>
+        <div class="card danger">
+          <h2>Zona de riesgo</h2>
+          <p class="muted">Elimina permanentemente todos los datos de la app.</p>
+          <button class="btn danger" id="set-wipe">Borrar todos los datos</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- MODAL -->
+  <div class="modal-overlay hidden" id="modal">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="modal-title">Editar</h2>
+        <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      <form id="modal-form" class="modal-body"></form>
+      <div class="modal-foot">
+        <button class="btn danger hidden" id="modal-delete">Eliminar</button>
+        <span class="spacer"></span>
+        <button class="btn" id="modal-cancel">Cancelar</button>
+        <button class="btn primary" id="modal-save">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BUSCADOR GLOBAL -->
+  <div class="search-overlay hidden" id="search">
+    <div class="search-box">
+      <div class="search-bar">
+        <span class="search-ico">🔍</span>
+        <input type="text" id="search-input" placeholder="Buscar notas, eventos, tareas, personas, grupos…" autocomplete="off" />
+        <kbd>Esc</kbd>
+      </div>
+      <div id="search-results" class="search-results"></div>
+      <div class="search-foot muted">↑ ↓ para moverse · Enter para abrir · Esc para cerrar</div>
+    </div>
+  </div>
+
+  <!-- Área de impresión (solo visible al imprimir) -->
+  <div id="print-area"></div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

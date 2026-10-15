@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Organizador Pastoral: organiza ideas, eventos, tareas y comunidad con una IA local que funciona sin internet. Descarga gratis para Windows." />
+  <meta name="theme-color" content="#0b0e1a" />
+  <title>Organizador Pastoral · IA local y offline para tu colegio</title>
+  <link rel="icon" href="favicon.png" />
+  <link rel="stylesheet" href="styles.css" />
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="scene" aria-hidden="true"></canvas>
+  <div class="glow" aria-hidden="true"></div>
+
+  <header class="nav">
+    <a class="brand" href="#top">
+      <span class="brand-logo">✝</span>
+      <span class="brand-name">Organizador Pastoral</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#caracteristicas">Características</a>
+      <a href="#como">Cómo funciona</a>
+      <a href="#interfaz">Interfaz</a>
+      <a href="#preguntas">Preguntas</a>
+    </nav>
+    <a class="btn btn-primary btn-sm" data-download href="#descarga">Descargar</a>
+  </header>
+
+  <main id="top">
+    <!-- HERO -->
+    <section class="hero">
+      <div class="hero-inner">
+        <span class="eyebrow">Hecho para colegios · 100% sin conexión</span>
+        <h1>Organiza tu pastoral con una <span class="grad">IA que vive en tu computadora</span></h1>
+        <p class="lead">
+          Ideas, eventos, tareas y comunidad en un solo lugar. Descarga, instala y listo:
+          funciona sin internet y tus datos nunca salen de tu equipo.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary btn-lg" data-download href="#descarga">
+            <span class="dl-ico">⬇</span> Descargar para Windows
+          </a>
+          <a class="btn btn-ghost btn-lg" href="#caracteristicas">Ver características</a>
+        </div>
+        <ul class="hero-meta">
+          <li>Windows 10 / 11</li>
+          <li>Instalador .exe</li>
+          <li>Sin cuentas ni suscripciones</li>
+        </ul>
+      </div>
+      <div class="scroll-hint" aria-hidden="true">Descubre más</div>
+    </section>
+
+    <!-- CARACTERÍSTICAS -->
+    <section id="caracteristicas" class="section">
+      <div class="section-head reveal">
+        <span class="kicker">Todo incluido</span>
+        <h2>Una sola app para toda la labor pastoral</h2>
+        <p class="muted">Sin pestañas infinitas ni herramientas dispersas. Todo pensado para el día a día del colegio.</p>
+      </div>
+      <div class="grid">
+        <article class="card reveal">
+          <div class="ico">💡</div>
+          <h3>Ideas y notas</h3>
+          <p>Captura reflexiones, borradores y proyectos con etiquetas y buscador instantáneo.</p>
+        </article>
+        <article class="card reveal">
+          <div class="ico">📅</div>
+          <h3>Eventos y calendario</h3>
+          <p>Misas, retiros, campañas y reuniones con calendario propio. Exporta a Google/Outlook (.ics) o PDF.</p>
+        </article>
+        <article class="card reveal">
+          <div class="ico">✅</div>
+          <h3>Tareas y recordatorios</h3>
+          <p>Organiza pendientes por prioridad. La app te avisa de lo vencido y de lo que viene.</p>
+        </article>
+        <article class="card reveal">
+          <div class="ico">👥</div>
+          <h3>Grupos y personas</h3>
+          <p>Gestiona la comunidad pastoral y lleva la asistencia a cada evento.</p>
+        </article>
+        <article class="card reveal">
+          <div class="ico">🤖</div>
+          <h3>Asistente con IA local</h3>
+          <p>Pídele “hazme un resumen de la semana” o “añade una tarea”. Crea contenido por ti, sin internet.</p>
+        </article>
+        <article class="card reveal">
+          <div class="ico">🔒</div>
+          <h3>Privado y sin conexión</h3>
+          <p>Tus datos se quedan en tu equipo, con copias de seguridad automáticas y exportación.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- CÓMO FUNCIONA -->
+    <section id="como" class="section">
+      <div class="section-head reveal">
+        <span class="kicker">Así de simple</span>
+        <h2>Descarga, instala y úsalo</h2>
+        <p class="muted">Sin cuentas, sin suscripciones y sin depender de internet.</p>
+      </div>
+      <ol class="steps">
+        <li class="reveal">
+          <span class="step-num">1</span>
+          <div>
+            <h3>Descarga el instalador</h3>
+            <p>Pulsa el botón y guarda el archivo <code>.exe</code> en tu computadora.</p>
+          </div>
+        </li>
+        <li class="reveal">
+          <span class="step-num">2</span>
+          <div>
+            <h3>Instálalo en un clic</h3>
+            <p>Sigue el asistente. Si Windows muestra un aviso, elige “Más información → Ejecutar de todos modos”.</p>
+          </div>
+        </li>
+        <li class="reveal">
+          <span class="step-num">3</span>
+          <div>
+            <h3>Empieza a organizarte</h3>
+            <p>La primera vez descarga el motor de IA (solo necesita internet una vez). Después funciona 100% offline.</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <!-- INTERFAZ (mockup) -->
+    <section id="interfaz" class="section">
+      <div class="section-head reveal">
+        <span class="kicker">Echa un vistazo</span>
+        <h2>Una interfaz clara, en español</h2>
+        <p class="muted">Todo a la vista y pensado para usarse sin manuales.</p>
+      </div>
+      <div class="mockup reveal">
+        <div class="mock-side">
+          <div class="mock-brand">✝ Organizador Pastoral</div>
+          <div class="mock-link active">🏠 Inicio</div>
+          <div class="mock-link">💡 Ideas y notas</div>
+          <div class="mock-link">📅 Eventos</div>
+          <div class="mock-link">✅ Tareas</div>
+          <div class="mock-link">👥 Comunidad</div>
+          <div class="mock-link">🤖 Asistente IA</div>
+          <div class="mock-badge">● IA conectada</div>
+        </div>
+        <div class="mock-main">
+          <div class="mock-head">
+            <h4>Buenos días, María</h4>
+            <span>Resumen de tu labor pastoral</span>
+          </div>
+          <div class="mock-stats">
+            <div><b>12</b><span>Ideas y notas</span></div>
+            <div><b>4</b><span>Eventos próximos</span></div>
+            <div><b>7</b><span>Tareas pendientes</span></div>
+            <div><b>23</b><span>Personas</span></div>
+          </div>
+          <div class="mock-rows">
+            <div class="mock-row">
+              <div><strong>Retiro de 4.º año</strong><span>Vie 12 · 09:00 · Capilla</span></div>
+              <span class="chip">Retiro</span>
+            </div>
+            <div class="mock-row">
+              <div><strong>Reunión de catequistas</strong><span>Lun 15 · 17:30 · Sala 2</span></div>
+              <span class="chip">Reunión</span>
+            </div>
+            <div class="mock-row">
+              <div><strong>Preparar oración de la mañana</strong><span>Vence hoy · Alta</span></div>
+              <span class="chip warn">Alta</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PREGUNTAS -->
+    <section id="preguntas" class="section">
+      <div class="section-head reveal">
+        <span class="kicker">Dudas frecuentes</span>
+        <h2>Preguntas frecuentes</h2>
+      </div>
+      <div class="faq reveal">
+        <details>
+          <summary>¿Necesito internet para usarlo?</summary>
+          <p>Solo la primera vez, para descargar el motor de IA y el modelo. Después puedes usarlo completamente sin conexión.</p>
+        </details>
+        <details>
+          <summary>¿Dónde se guardan mis datos?</summary>
+          <p>En tu propia computadora, en una carpeta local de la aplicación. Nada se envía a internet. Además hay copias de seguridad automáticas.</p>
+        </details>
+        <details>
+          <summary>¿Windows me avisa al instalar?</summary>
+          <p>Puede aparecer un aviso de SmartScreen porque la app no está firmada digitalmente. Elige “Más información → Ejecutar de todos modos”.</p>
+        </details>
+        <details>
+          <summary>¿Es gratis? ¿Hay suscripciones?</summary>
+          <p>Sí, es gratis. No hay cuentas ni suscripciones: descargas, instalas y usas.</p>
+        </details>
+        <details>
+          <summary>¿Funciona en Mac o Linux?</summary>
+          <p>De momento está pensado para Windows 10 y 11.</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- DESCARGA -->
+    <section id="descarga" class="cta">
+      <div class="cta-card reveal">
+        <h2>Lleva tu pastoral al siguiente nivel</h2>
+        <p class="muted">Gratis y sin registro. Descárgalo y empieza en minutos.</p>
+        <a class="btn btn-primary btn-lg" data-download href="#">
+          <span class="dl-ico">⬇</span> Descargar para Windows
+        </a>
+        <p class="fineprint">Instalador .exe · Windows 10/11 · Tus datos permanecen en tu equipo</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-brand">
+      <span class="brand-logo">✝</span>
+      <div>
+        <strong>Organizador Pastoral</strong>
+        <span class="muted">IA local para la pastoral escolar</span>
+      </div>
+    </div>
+    <nav class="footer-links">
+      <a href="#caracteristicas">Características</a>
+      <a href="#como">Cómo funciona</a>
+      <a href="#preguntas">Preguntas</a>
+      <a data-download href="#descarga">Descargar</a>
+    </nav>
+    <p class="footer-copy muted">© <span id="year"></span> Organizador Pastoral</p>
+  </footer>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

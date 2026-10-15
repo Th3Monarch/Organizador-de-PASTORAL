@@ -1,0 +1,20 @@
+# Dependencias
+node_modules/
+
+# Builds y empaquetado
+dist/
+out/
+*.blockmap
+
+# Logs
+*.log
+npm-debug.log*
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
