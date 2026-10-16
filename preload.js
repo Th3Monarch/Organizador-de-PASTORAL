@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('pastoral', {
   aiStart: () => ipcRenderer.invoke('ai:start'),
   aiStop: () => ipcRenderer.invoke('ai:stop'),
   aiPull: (model) => ipcRenderer.invoke('ai:pull', model),
+  aiDelete: (model) => ipcRenderer.invoke('ai:delete', model),
   aiUninstall: () => ipcRenderer.invoke('ai:uninstall'),
   onAiProgress: (cb) => {
     const handler = (_evt, data) => cb(data);

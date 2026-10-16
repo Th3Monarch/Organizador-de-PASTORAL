@@ -235,6 +235,7 @@ app.whenReady().then(() => {
   ipcMain.handle('ai:start', () => ai.startServer());
   ipcMain.handle('ai:stop', () => { ai.stopServer(); return { ok: true }; });
   ipcMain.handle('ai:pull', (_evt, model) => ai.pullModel(model));
+  ipcMain.handle('ai:delete', (_evt, model) => ai.deleteModel(model));
   ipcMain.handle('ai:uninstall', () => ai.uninstall());
 
   ipcMain.handle('ai:status', async (_evt, url) => {
@@ -317,9 +318,9 @@ app.whenReady().then(() => {
 
   createWindow();
 
-  if (ai.isInstalled()) {
-    ai.startServer().catch(() => {});
-  }
+  ai.isInstalled().then((installed) => {
+    if (installed) return ai.startServer();
+  }).catch(() => {});
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -287,6 +287,21 @@
             <button class="btn" id="set-ai-stop">Detener</button>
             <button class="btn danger" id="set-ai-uninstall">Desinstalar IA</button>
           </div>
+          <div class="setup-step" style="margin-top:16px">
+            <div class="step-body">
+              <strong>Modelos de lenguaje</strong>
+              <span class="muted">Puedes descargar y usar varios modelos a la vez.</span>
+              <select id="set-model-choice">
+                <option value="gemma4:12b">Gemma 4 12B — chat diario (~8 GB)</option>
+                <option value="qwen3.5:9b">Qwen 3.5 9B — chat profundo (~6 GB)</option>
+                <option value="llama3.2">Llama 3.2 3B — ligero (~2 GB)</option>
+              </select>
+              <div class="bar hidden" id="bar-model-set"><div class="bar-fill"></div></div>
+              <div class="muted" id="set-ai-progress"></div>
+            </div>
+            <button class="btn primary" id="set-ai-pull">Descargar</button>
+          </div>
+          <div id="set-ai-models" class="list" style="margin-top:12px"></div>
           <p class="muted" id="set-ai-dir" style="margin-top:12px"></p>
         </div>
         <div class="card">

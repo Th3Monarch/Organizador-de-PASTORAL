@@ -31,9 +31,16 @@ function ensureDirs() {
   fs.mkdirSync(aiDir(), { recursive: true });
 }
 
-function zipUrl() {
+function zipUrls() {
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
-  return `https://github.com/ollama/ollama/releases/latest/download/ollama-windows-${arch}.zip`;
+  return [
+    `https://github.com/ollama/ollama/releases/latest/download/ollama-windows-${arch}.zip`,
+    `https://ollama.com/download/ollama-windows-${arch}.zip`
+  ];
+}
+
+function zipUrl() {
+  return zipUrls()[0];
 }
 
 function findFile(dir, name) {
@@ -202,13 +209,30 @@ async function installOllama(force) {
       if (fs.existsSync(zipPath) && looksLikeZip(zipPath)) {
         progress({ phase: 'download', percent: 100, status: 'Usando el paquete ya descargado' });
       } else {
-        await downloadFile(zipUrl(), zipPath, (received, total, reset) => {
+        const onProgress = (received, total, reset) => {
           const percent = total ? Math.round((received / total) * 100) : 0;
           const mb = (received / 1048576).toFixed(0);
           const totMb = total ? (total / 1048576).toFixed(0) : '?';
           const prefix = reset ? 'Reintentando descarga...' : 'Descargando IA...';
           progress({ phase: 'download', percent, status: `${prefix} ${mb} MB de ${totMb} MB` });
-        });
+        };
+        const urls = zipUrls();
+        let lastDlErr = null;
+        let downloaded = false;
+        for (let i = 0; i < urls.length; i++) {
+          try {
+            if (i > 0) progress({ phase: 'download', percent: 0, status: 'Reintentando con otro servidor...' });
+            await downloadFile(urls[i], zipPath, onProgress);
+            downloaded = true;
+            break;
+          } catch (e) {
+            lastDlErr = e;
+          }
+        }
+        if (!downloaded) {
+          throw new Error('No se pudo descargar el motor de IA. Comprueba tu conexión a internet o el cortafuegos. ' +
+            (lastDlErr && lastDlErr.message ? '(' + lastDlErr.message + ')' : ''));
+        }
       }
 
       const free2 = freeSpaceGB(aiDir());
@@ -221,24 +245,32 @@ async function installOllama(force) {
       }
 
       progress({ phase: 'extract', percent: 99, status: 'Instalando... (esto puede tardar unos minutos)' });
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      await removeDirRobust(tmpDir);
       fs.mkdirSync(tmpDir, { recursive: true });
       await extractZip(zipPath, tmpDir);
       if (!findFile(tmpDir, 'ollama.exe')) {
         throw new Error('El paquete descargado no contiene ollama.exe. Inténtalo de nuevo.');
       }
-      fs.rmSync(serverDir(), { recursive: true, force: true });
+      await stopServerForce();
+      await removeDirRobust(serverDir());
       fs.renameSync(tmpDir, serverDir());
       try { fs.rmSync(zipPath, { force: true }); } catch (e) { /* noop */ }
       progress({ phase: 'extract', percent: 100, status: 'IA instalada' });
     }
-    await startServer();
+    const started = await startServer();
+    if (!started.ok) {
+      throw new Error(started.error || 'El motor se instaló pero no se pudo iniciar.');
+    }
     progress({ phase: 'done', percent: 100, status: 'IA lista' });
     return { ok: true };
   } catch (err) {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* noop */ }
-    progress({ phase: 'error', status: String(err.message || err) });
-    return { ok: false, error: String(err.message || err) };
+    let msg = String(err.message || err);
+    if (err && ['EPERM', 'EBUSY', 'EACCES'].includes(err.code)) {
+      msg = 'No se pudo reemplazar el motor porque un proceso lo está usando. Detén la IA o reinicia el equipo e inténtalo de nuevo. (' + msg + ')';
+    }
+    progress({ phase: 'error', status: msg });
+    return { ok: false, error: msg };
   } finally {
     installing = false;
   }
@@ -255,28 +287,46 @@ async function startServer() {
   starting = (async () => {
     ensureDirs();
     const dir = path.dirname(exe);
-    child = spawn(exe, ['serve'], {
-      cwd: dir,
-      windowsHide: true,
-      env: {
-        ...process.env,
-        OLLAMA_HOST,
-        OLLAMA_MODELS: modelsDir()
-      },
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    child.on('exit', () => { child = null; });
-    child.stdout.on('data', () => {});
-    child.stderr.on('data', () => {});
+    let log = '';
+    let exited = false;
+    let exitCode = null;
+    let proc;
+    try {
+      proc = spawn(exe, ['serve'], {
+        cwd: dir,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          OLLAMA_HOST,
+          OLLAMA_MODELS: modelsDir()
+        },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    } catch (e) {
+      starting = null;
+      return { ok: false, error: 'No se pudo iniciar el motor de IA: ' + String(e.message || e) };
+    }
+    child = proc;
+    proc.on('error', (e) => { log += String(e.message || e) + '\n'; exited = true; });
+    proc.on('exit', (code) => { exited = true; exitCode = code; if (child === proc) child = null; });
+    const collect = (d) => { log += d.toString(); if (log.length > 4000) log = log.slice(-4000); };
+    proc.stdout.on('data', collect);
+    proc.stderr.on('data', collect);
 
     const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
       const p = await ping();
       if (p.online) { starting = null; return { ok: true }; }
+      if (exited) {
+        starting = null;
+        const detail = log.trim().split('\n').filter(Boolean).slice(-3).join(' ');
+        return { ok: false, error: 'El motor de IA se cerró inesperadamente. ' + (detail || ('código ' + exitCode)) };
+      }
       await new Promise((r) => setTimeout(r, 800));
     }
     starting = null;
-    return { ok: false, error: 'El motor de IA no respondió a tiempo' };
+    const detail = log.trim().split('\n').filter(Boolean).slice(-3).join(' ');
+    return { ok: false, error: 'El motor de IA no respondió a tiempo' + (detail ? '. ' + detail : '') };
   })();
   return starting;
 }
@@ -286,6 +336,47 @@ function stopServer() {
     try { child.kill(); } catch (e) { /* noop */ }
     child = null;
   }
+}
+
+function waitExit(proc, ms) {
+  return new Promise((resolve) => {
+    const end = Date.now() + ms;
+    const tick = () => {
+      if (!proc || proc.exitCode !== null || proc.signalCode !== null) return resolve(true);
+      if (Date.now() >= end) return resolve(false);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
+
+async function stopServerForce() {
+  const proc = child;
+  child = null;
+  starting = null;
+  if (proc) {
+    try { proc.kill(); } catch (e) { /* noop */ }
+    await waitExit(proc, 6000);
+  }
+  try {
+    await runProcess('taskkill', ['/F', '/IM', 'ollama.exe', '/T']);
+  } catch (e) { /* no hay procesos o no se pudo */ }
+  await new Promise((r) => setTimeout(r, 500));
+}
+
+async function removeDirRobust(dir) {
+  let lastErr;
+  for (let i = 0; i < 12; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (!['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY', 'EMFILE'].includes(e.code)) throw e;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw lastErr;
 }
 
 async function pullModel(model) {
@@ -344,10 +435,30 @@ async function pullModel(model) {
   }
 }
 
-async function uninstall() {
-  stopServer();
+async function deleteModel(model) {
+  if (!model) return { ok: false, error: 'Modelo no especificado' };
+  const st = await ping();
+  if (!st.online) {
+    const s = await startServer();
+    if (!s.ok) return s;
+  }
   try {
-    if (fs.existsSync(aiDir())) fs.rmSync(aiDir(), { recursive: true, force: true });
+    const res = await fetch(`${OLLAMA_URL}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, name: model })
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}: ${await res.text()}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+}
+
+async function uninstall() {
+  await stopServerForce();
+  try {
+    if (fs.existsSync(aiDir())) await removeDirRobust(aiDir());
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
@@ -363,7 +474,8 @@ module.exports = {
   startServer,
   stopServer,
   pullModel,
+  deleteModel,
   uninstall,
   ping,
-  _internals: { findFile, downloadFile, extractZip, zipUrl, freeSpaceGB, looksLikeZip, runProcess }
+  _internals: { findFile, downloadFile, extractZip, zipUrl, zipUrls, freeSpaceGB, looksLikeZip, runProcess }
 };

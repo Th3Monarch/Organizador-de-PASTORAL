@@ -956,6 +956,7 @@ async function refreshAiManager() {
   try { aiMgr = await api.aiManagerStatus(); } catch (e) { /* noop */ }
   updateChatModeUi();
   updateAiUi();
+  renderAiModels();
 }
 
 function updateChatModeUi() {
@@ -991,61 +992,126 @@ function updateAiUi() {
   $('#btn-install').textContent = installed ? 'Reparar' : 'Instalar';
 
   modelStep.classList.toggle('done', hasModel);
-  $('#btn-pull').disabled = !(installed && running);
+  $('#btn-pull').disabled = !installed;
+  const setPull = $('#set-ai-pull');
+  if (setPull) setPull.disabled = !installed;
+}
+
+function setAiStatusText(text) {
+  ['#ai-progress-text', '#set-ai-progress'].forEach((sel) => {
+    const el = $(sel);
+    if (el) el.textContent = text;
+  });
 }
 
 function setBar(id, percent) {
   const bar = $('#' + id);
+  if (!bar) return;
   bar.classList.remove('hidden');
-  bar.querySelector('.bar-fill').style.width = Math.max(0, Math.min(100, percent)) + '%';
+  const fill = bar.querySelector('.bar-fill');
+  if (fill) fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
+}
+
+function hideBars() {
+  ['bar-engine', 'bar-model', 'bar-model-set'].forEach((id) => {
+    const bar = $('#' + id);
+    if (bar) bar.classList.add('hidden');
+  });
 }
 
 function handleAiProgress(d) {
-  $('#ai-progress-text').textContent = d.status || '';
+  setAiStatusText(d.status || '');
+  const badge = $('#ai-badge');
   if (d.phase === 'download' || d.phase === 'extract') {
     setBar('bar-engine', d.percent || 0);
-    const badge = $('#ai-badge');
-    badge.className = 'ai-badge busy';
-    badge.textContent = '● Instalando IA...';
+    if (badge) { badge.className = 'ai-badge busy'; badge.textContent = '● Instalando IA...'; }
   } else if (d.phase === 'pull') {
     setBar('bar-model', d.percent || 0);
-    const badge = $('#ai-badge');
-    badge.className = 'ai-badge busy';
-    badge.textContent = '● Bajando modelo...';
+    setBar('bar-model-set', d.percent || 0);
+    if (badge) { badge.className = 'ai-badge busy'; badge.textContent = '● Bajando modelo...'; }
   } else if (d.phase === 'done') {
-    $('#bar-engine').classList.add('hidden');
-    $('#bar-model').classList.add('hidden');
+    hideBars();
     refreshAiManager(); checkAi();
   } else if (d.phase === 'error') {
-    $('#bar-engine').classList.add('hidden');
-    $('#bar-model').classList.add('hidden');
+    hideBars();
     toast(d.status || 'Error al preparar la IA');
     refreshAiManager();
   }
 }
 
 async function installAi(force) {
-  $('#btn-install').disabled = true;
-  $('#btn-pull').disabled = true;
-  $('#ai-progress-text').textContent = 'Iniciando instalación...';
+  const btn = $('#btn-install');
+  if (btn) btn.disabled = true;
+  const btnPull = $('#btn-pull');
+  if (btnPull) btnPull.disabled = true;
+  setAiStatusText('Iniciando instalación...');
   const res = await api.aiInstall(force);
-  $('#btn-install').disabled = false;
+  if (btn) btn.disabled = false;
   await refreshAiManager();
   await checkAi();
   if (res.ok) toast('Motor de IA instalado');
   else toast('Error: ' + res.error);
 }
 
-async function pullModel() {
-  const model = $('#model-choice').value;
-  if (!model) return;
-  $('#btn-pull').disabled = true;
-  $('#ai-progress-text').textContent = 'Iniciando descarga del modelo...';
+async function pullModel(selectEl, buttonEl, progressEl) {
+  const select = selectEl || $('#model-choice');
+  const button = buttonEl || $('#btn-pull');
+  const model = select && select.value;
+  if (!model || !model.trim()) { toast('Elige un modelo'); return; }
+  if (button) button.disabled = true;
+  const progressText = progressEl || $('#ai-progress-text');
+  if (progressText) progressText.textContent = 'Iniciando descarga del modelo...';
   const res = await api.aiPull(model);
-  if (!res.ok) { toast('Error: ' + res.error); $('#btn-pull').disabled = false; return; }
+  hideBars();
+  if (!res.ok) { if (button) button.disabled = false; toast('Error: ' + res.error); await refreshAiManager(); return; }
   await refreshAiManager();
   await checkAi();
   toast('Modelo listo');
+}
+
+function modelLabel(name) {
+  const known = {
+    'gemma4:12b': 'Gemma 4 12B — chat diario',
+    'qwen3.5:9b': 'Qwen 3.5 9B — chat profundo',
+    'llama3.2': 'Llama 3.2 3B — ligero'
+  };
+  return known[name] || name;
+}
+
+function renderAiModels() {
+  const wrap = $('#set-ai-models');
+  if (!wrap) return;
+  const models = aiMgr.models || [];
+  if (!models.length) {
+    wrap.innerHTML = '<div class="empty">Todavía no hay modelos descargados. Instala el motor y descarga el que prefieras.</div>';
+  } else {
+    wrap.innerHTML = models.map((m) => `
+      <div class="list-item" style="cursor:default">
+        <div class="li-main">
+          <div class="li-title">${esc(modelLabel(m))}</div>
+          <div class="li-sub">${esc(m)}</div>
+        </div>
+        <button class="btn danger" data-delmodel="${esc(m)}">Borrar</button>
+      </div>`).join('');
+  }
+  const sel = $('#set-model-choice');
+  if (sel) {
+    Array.from(sel.options).forEach((opt) => {
+      const base = opt.dataset.base || opt.textContent.replace(/ · descargado$/, '');
+      opt.dataset.base = base;
+      opt.textContent = base + (models.includes(opt.value) ? ' · descargado' : '');
+    });
+  }
+}
+
+async function deleteAiModel(model) {
+  if (!model) return;
+  if (!confirm('¿Borrar el modelo "' + model + '"? Podrás volver a descargarlo cuando quieras.')) return;
+  const res = await api.aiDelete(model);
+  if (!res.ok) { toast('Error: ' + res.error); return; }
+  await refreshAiManager();
+  await checkAi();
+  toast('Modelo borrado');
 }
 
 function thinkingHTML() {
@@ -1954,6 +2020,9 @@ function bindEvents() {
     const delBackup = e.target.closest('[data-delbackup]');
     if (delBackup) { deleteBackup(delBackup.dataset.delbackup); return; }
 
+    const delModel = e.target.closest('[data-delmodel]');
+    if (delModel) { deleteAiModel(delModel.dataset.delmodel); return; }
+
     const goto = e.target.closest('[data-goto]');
     if (goto) { go(goto.dataset.goto); return; }
 
@@ -2082,7 +2151,8 @@ function bindEvents() {
 
   // Settings / IA
   $('#btn-install').addEventListener('click', () => installAi(!!aiMgr.installed));
-  $('#btn-pull').addEventListener('click', pullModel);
+  $('#btn-pull').addEventListener('click', () => pullModel($('#model-choice'), $('#btn-pull'), $('#ai-progress-text')));
+  $('#set-ai-pull').addEventListener('click', () => pullModel($('#set-model-choice'), $('#set-ai-pull'), $('#set-ai-progress')));
   $('#set-ai-install').addEventListener('click', () => installAi(!!aiMgr.installed));
   $('#set-ai-start').addEventListener('click', async () => {
     await api.aiStart(); await refreshAiManager(); await checkAi(); toast('IA iniciada');
