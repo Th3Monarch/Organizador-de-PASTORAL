@@ -7,7 +7,7 @@ import * as THREE from "three";
    última versión del instalador.
    ============================================================ */
 const DOWNLOAD_URL =
-  "https://github.com/Th3Monarch/Organizador-de-PASTORAL/releases/latest/download/Organizador-Pastoral-Setup-1.0.0.exe";
+  "https://github.com/Th3Monarch/Organizador-de-PASTORAL/releases/download/v1.1.0/Organizador-Pastoral-Setup-1.1.0.exe";
 
 /* ---------- Enlaces de descarga ---------- */
 document.querySelectorAll("[data-download]").forEach((a) => {
