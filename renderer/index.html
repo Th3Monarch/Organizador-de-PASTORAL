@@ -26,7 +26,7 @@
         <button class="nav-item" data-view="settings"><span class="ico">⚙️</span> Ajustes</button>
       </nav>
       <div class="sidebar-foot">
-        <div id="ai-badge" class="ai-badge offline">● IA desconectada</div>
+        <div id="ai-badge" class="ai-badge offline">● IA sin configurar</div>
         <p class="credit muted">Desarrollado por Manuel Guia</p>
       </div>
     </aside>
@@ -196,43 +196,29 @@
       <!-- ASSISTANT -->
       <section class="view hidden" id="view-assistant">
         <header class="view-head">
-          <div><h1>Asistente IA</h1><p class="muted">Funciona sin conexión, en tu equipo</p></div>
+          <div><h1>Asistente IA</h1><p class="muted" id="ai-subtitle">Usando OpenRouter (modelo por internet)</p></div>
           <div class="head-actions">
             <span id="ai-chip" class="pill">Comprobando...</span>
-            <select id="chat-mode" class="small" title="Elige el modelo del chat">
-              <option value="daily">Diario · Gemma 4 12B</option>
-              <option value="deep">Profundo · Qwen 3.5 9B</option>
-            </select>
             <button class="btn" id="chat-clear">Limpiar</button>
           </div>
         </header>
 
         <div class="card setup-card hidden" id="ai-setup">
-          <h2>Activa tu asistente de IA</h2>
-          <p class="muted">Se descarga una sola vez. Después funciona sin internet. La descarga puede tardar según tu conexión.</p>
-          <div class="setup-step" id="step-engine">
-            <div class="step-num">1</div>
-            <div class="step-body">
-              <strong>Motor de IA</strong>
-              <span class="muted" id="step-engine-desc">Pendiente</span>
-              <div class="bar hidden" id="bar-engine"><div class="bar-fill"></div></div>
-            </div>
-            <button class="btn primary" id="btn-install">Instalar</button>
+          <h2>Activa tu asistente</h2>
+          <p class="muted">Funciona con <strong>OpenRouter</strong>: modelos potentes (y gratuitos) por internet. Solo necesitas una clave de API personal.</p>
+          <label class="field"><span>Clave de API de OpenRouter</span>
+            <input id="setup-cloud-apikey" type="password" placeholder="sk-or-..." autocomplete="off" />
+          </label>
+          <label class="field"><span>Modelo</span>
+            <input id="setup-cloud-model" list="setup-cloud-modellist" placeholder="p. ej. google/gemma-4-31b-it:free" />
+            <datalist id="setup-cloud-modellist"></datalist>
+          </label>
+          <div class="row" style="margin-top:6px">
+            <button class="btn" type="button" id="setup-cloud-models">Ver modelos disponibles</button>
+            <button class="btn primary" type="button" id="setup-cloud-test">Probar conexión</button>
+            <span id="setup-cloud-status" class="pill">Sin configurar</span>
           </div>
-          <div class="setup-step" id="step-model">
-            <div class="step-num">2</div>
-            <div class="step-body">
-              <strong>Modelo de lenguaje</strong>
-              <select id="model-choice">
-                <option value="gemma4:12b" selected>Gemma 4 12B — chat diario (~8 GB)</option>
-                <option value="qwen3.5:9b">Qwen 3.5 9B — chat profundo (~6 GB)</option>
-                <option value="llama3.2">Llama 3.2 3B — ligero (~2 GB)</option>
-              </select>
-              <div class="bar hidden" id="bar-model"><div class="bar-fill"></div></div>
-            </div>
-            <button class="btn primary" id="btn-pull">Descargar</button>
-          </div>
-          <div class="muted" id="ai-progress-text" style="margin-top:12px"></div>
+          <p class="muted" style="margin-top:10px">Consigue tu clave gratis en <strong>openrouter.ai</strong> → <em>Keys</em>. Se guarda solo en tu equipo. Recomendado: <em>google/gemma-4-31b-it:free</em>.</p>
         </div>
 
         <div class="chat hidden" id="chat-box">
@@ -261,7 +247,7 @@
 
       <!-- SETTINGS -->
       <section class="view hidden" id="view-settings">
-        <header class="view-head"><div><h1>Ajustes</h1><p class="muted">Configuración general y de IA local</p></div></header>
+        <header class="view-head"><div><h1>Ajustes</h1><p class="muted">Configuración general y de IA</p></div></header>
         <div class="card">
           <h2>Datos personales</h2>
           <label class="field"><span>Tu nombre</span><input id="set-pastor" placeholder="Ej: María González" /></label>
@@ -276,33 +262,21 @@
           <label class="check-row"><input type="checkbox" id="set-welcome" /> Mostrar pantalla de bienvenida al iniciar</label>
         </div>
         <div class="card">
-          <h2>IA local</h2>
-          <p class="muted">La app descarga y administra su propia IA. No necesitas instalar nada aparte. Todo funciona sin internet una vez descargado.</p>
+          <h2>IA en la nube (OpenRouter)</h2>
+          <p class="muted">El asistente usa modelos por internet a través de OpenRouter. Necesitas una clave de API propia (gratis). Se guarda solo en tu equipo.</p>
+          <label class="field"><span>Clave de API de OpenRouter</span>
+            <input id="set-cloud-apikey" type="password" placeholder="sk-or-..." autocomplete="off" />
+          </label>
+          <label class="field"><span>Modelo</span>
+            <input id="set-cloud-model" list="set-cloud-modellist" placeholder="p. ej. google/gemma-4-31b-it:free" />
+            <datalist id="set-cloud-modellist"></datalist>
+          </label>
           <div class="row" style="margin-top:6px">
-            <span id="set-ai-state" class="pill">Comprobando...</span>
+            <button class="btn" type="button" id="set-cloud-models">Ver modelos disponibles</button>
+            <button class="btn primary" type="button" id="set-cloud-test">Probar conexión</button>
+            <span id="set-cloud-status" class="pill">Sin configurar</span>
           </div>
-          <div class="row" style="margin-top:12px">
-            <button class="btn primary" id="set-ai-install">Instalar / Reparar IA</button>
-            <button class="btn" id="set-ai-start">Iniciar</button>
-            <button class="btn" id="set-ai-stop">Detener</button>
-            <button class="btn danger" id="set-ai-uninstall">Desinstalar IA</button>
-          </div>
-          <div class="setup-step" style="margin-top:16px">
-            <div class="step-body">
-              <strong>Modelos de lenguaje</strong>
-              <span class="muted">Puedes descargar y usar varios modelos a la vez.</span>
-              <select id="set-model-choice">
-                <option value="gemma4:12b">Gemma 4 12B — chat diario (~8 GB)</option>
-                <option value="qwen3.5:9b">Qwen 3.5 9B — chat profundo (~6 GB)</option>
-                <option value="llama3.2">Llama 3.2 3B — ligero (~2 GB)</option>
-              </select>
-              <div class="bar hidden" id="bar-model-set"><div class="bar-fill"></div></div>
-              <div class="muted" id="set-ai-progress"></div>
-            </div>
-            <button class="btn primary" id="set-ai-pull">Descargar</button>
-          </div>
-          <div id="set-ai-models" class="list" style="margin-top:12px"></div>
-          <p class="muted" id="set-ai-dir" style="margin-top:12px"></p>
+          <p class="muted" style="margin-top:10px">Consigue tu clave gratis en <strong>openrouter.ai</strong> → <em>Keys</em>. Recomendado: <em>google/gemma-4-31b-it:free</em>.</p>
         </div>
         <div class="card">
           <h2>Datos y respaldo</h2>

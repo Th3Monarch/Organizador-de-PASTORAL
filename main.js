@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, shell, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const ai = require('./ai-manager');
+const cloud = require('./cloud-manager');
 
 let mainWindow = null;
 let dataFilePath = null;
@@ -18,11 +18,38 @@ const EMPTY_DATA = {
   settings: {
     pastorName: '',
     schoolName: '',
-    ollamaUrl: 'http://127.0.0.1:11434',
-    model: 'llama3.2',
-    theme: 'light'
+    theme: 'light',
+    cloud: { apiKey: '', model: '' }
   }
 };
+
+function buildCloudHeaders(format, apiKey) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (format === 'anthropic') {
+    headers['anthropic-version'] = '2023-06-01';
+    if (apiKey) { headers['x-api-key'] = apiKey; headers.Authorization = 'Bearer ' + apiKey; }
+  } else if (apiKey) {
+    headers.Authorization = 'Bearer ' + apiKey;
+  }
+  return headers;
+}
+
+function shortenText(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.length > 300 ? s.slice(0, 300) + '…' : s;
+}
+
+async function listCloudModels(format, base, apiKey) {
+  try {
+    const res = await fetch(`${base}/models`, { headers: buildCloudHeaders(format, apiKey) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const arr = Array.isArray(data) ? data : (data.data || data.models || []);
+    return arr.map((m) => m && (m.id || m.name)).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
+}
 
 function ensureDataFile() {
   dataFilePath = path.join(app.getPath('userData'), 'pastoral-data.json');
@@ -155,10 +182,6 @@ app.whenReady().then(() => {
   ensureDataFile();
   backupDaily();
 
-  ai.setNotifier((data) => {
-    BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('ai:progress', data));
-  });
-
   ipcMain.handle('data:load', () => readData());
   ipcMain.handle('data:save', (_evt, data) => writeData(data));
   ipcMain.handle('data:path', () => dataFilePath);
@@ -229,31 +252,9 @@ app.whenReady().then(() => {
     return true;
   });
 
-  // ----- IA local administrada por la app (Ollama) -----
-  ipcMain.handle('ai:manager-status', () => ai.status());
-  ipcMain.handle('ai:install', (_evt, force) => ai.installOllama(force));
-  ipcMain.handle('ai:start', () => ai.startServer());
-  ipcMain.handle('ai:stop', () => { ai.stopServer(); return { ok: true }; });
-  ipcMain.handle('ai:pull', (_evt, model) => ai.pullModel(model));
-  ipcMain.handle('ai:delete', (_evt, model) => ai.deleteModel(model));
-  ipcMain.handle('ai:uninstall', () => ai.uninstall());
-
-  ipcMain.handle('ai:status', async (_evt, url) => {
-    const base = (url || ai.OLLAMA_URL).replace(/\/$/, '');
-    try {
-      const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(4000) });
-      if (!res.ok) return { online: false, models: [] };
-      const json = await res.json();
-      const models = (json.models || []).map((m) => m.name);
-      return { online: true, models };
-    } catch (err) {
-      return { online: false, models: [], error: String(err.message || err) };
-    }
-  });
-
-  ipcMain.handle('ai:chat', async (evt, payload) => {
-    const { url, model, messages, tools, requestId } = payload || {};
-    const base = (url || ai.OLLAMA_URL).replace(/\/$/, '');
+  // ----- IA en la nube (OpenRouter) -----
+  ipcMain.handle('ai:cloud:chat', async (evt, payload) => {
+    const { format, baseUrl, apiKey, model, messages, tools, requestId } = payload || {};
     let ctrl = null;
     let signal = AbortSignal.timeout(180000);
     if (requestId) {
@@ -263,46 +264,7 @@ app.whenReady().then(() => {
     }
     const onDelta = (delta) => { try { evt.sender.send('ai:stream', { requestId, delta }); } catch (e) { /* noop */ } };
     try {
-      const apiMessages = (messages || []).map((m) => {
-        if (!m || !Array.isArray(m.images) || !m.images.length) return m;
-        return { ...m, images: m.images.map((s) => String(s).replace(/^data:[^,]*,/, '')) };
-      });
-      const body = { model, messages: apiMessages, stream: true };
-      if (tools && tools.length) body.tools = tools;
-      const res = await fetch(`${base}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        return { ok: false, error: `HTTP ${res.status}: ${txt}` };
-      }
-      // Ollama emite NDJSON (una línea JSON por fragmento)
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let content = '';
-      const tool_calls = [];
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-        for (const line of lines) {
-          const s = line.trim();
-          if (!s) continue;
-          let obj;
-          try { obj = JSON.parse(s); } catch (e) { continue; }
-          if (obj.error) return { ok: false, error: String(obj.error) };
-          const msg = obj.message || {};
-          if (msg.content) { content += msg.content; onDelta(msg.content); }
-          if (Array.isArray(msg.tool_calls)) tool_calls.push(...msg.tool_calls);
-        }
-      }
-      return { ok: true, content, tool_calls };
+      return await cloud.chat({ format, baseUrl, apiKey, model, messages, tools }, { signal, onDelta });
     } catch (err) {
       if (ctrl && ctrl.signal.aborted) return { ok: false, canceled: true, error: 'Respuesta detenida por el usuario.' };
       return { ok: false, error: String(err.message || err) };
@@ -311,16 +273,39 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('ai:cloud:test', async (_evt, payload) => {
+    const { format, baseUrl, apiKey, model } = payload || {};
+    const base = cloud.normalizeBase(baseUrl);
+    if (!base) return { ok: false, error: 'Falta la dirección del servicio (URL).' };
+    if (!model) return { ok: false, error: 'Falta el nombre del modelo.' };
+    try {
+      const headers = buildCloudHeaders(format, apiKey);
+      const url = format === 'anthropic' ? `${base}/messages` : `${base}/chat/completions`;
+      const body = format === 'anthropic'
+        ? { model, max_tokens: 16, messages: [{ role: 'user', content: 'Responde solo con: ok' }] }
+        : { model, max_tokens: 5, messages: [{ role: 'user', content: 'ping' }] };
+      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}: ${shortenText(await res.text())}` };
+      return { ok: true, models: await listCloudModels(format, base, apiKey) };
+    } catch (err) {
+      return { ok: false, error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('ai:cloud:models', async (_evt, payload) => {
+    const { format, baseUrl, apiKey } = payload || {};
+    const base = cloud.normalizeBase(baseUrl);
+    if (!base) return { ok: false, models: [], error: 'Falta la dirección del servicio (URL).' };
+    const models = await listCloudModels(format, base, apiKey);
+    return { ok: true, models };
+  });
+
   ipcMain.on('ai:cancel', (_evt, requestId) => {
     const c = activeChatAborts.get(requestId);
     if (c) { try { c.abort(); } catch (e) { /* noop */ } }
   });
 
   createWindow();
-
-  ai.isInstalled().then((installed) => {
-    if (installed) return ai.startServer();
-  }).catch(() => {});
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -333,5 +318,4 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   allowClose = true;
-  ai.stopServer();
 });

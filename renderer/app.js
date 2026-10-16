@@ -4,16 +4,15 @@
 
 const api = window.pastoral;
 
-const CHAT_MODELS = {
-  daily: { model: 'gemma4:12b', label: 'Diario · Gemma 4 12B' },
-  deep: { model: 'qwen3.5:9b', label: 'Profundo · Qwen 3.5 9B' }
-};
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1';
+const DEFAULT_MODEL = 'google/gemma-4-31b-it:free';
 
 let state = {
   notes: [], events: [], tasks: [], groups: [], persons: [], chat: [],
   settings: {
     pastorName: '', schoolName: '',
-    ollamaUrl: 'http://127.0.0.1:11434', theme: 'light', chatMode: 'daily', notify: true, showWelcome: true
+    theme: 'light', notify: true, showWelcome: true,
+    cloud: { apiKey: '', model: DEFAULT_MODEL }
   }
 };
 
@@ -35,8 +34,6 @@ let ui = {
   searchItems: [],
   notified: {}
 };
-
-let aiMgr = { installed: false, running: false, models: [], exe: null, dataDir: '', port: 11434 };
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -354,10 +351,14 @@ async function persist() {
 }
 
 function mergeData(data) {
+  const ds = data.settings || {};
+  const settings = { ...state.settings, ...ds };
+  settings.cloud = { ...state.settings.cloud, ...(ds.cloud || {}) };
+  if (!settings.cloud.model) settings.cloud.model = DEFAULT_MODEL;
   state = {
     notes: data.notes || [], events: data.events || [], tasks: data.tasks || [],
     groups: data.groups || [], persons: data.persons || [], chat: data.chat || [],
-    settings: { ...state.settings, ...(data.settings || {}) }
+    settings
   };
 }
 
@@ -384,7 +385,7 @@ function render() {
     case 'events': renderCalendar(); renderEventsDay(); break;
     case 'tasks': renderTasks(); break;
     case 'community': renderCommunity(); break;
-    case 'assistant': renderChat(); refreshAiManager(); break;
+    case 'assistant': renderChat(); updateAssistantUi(); break;
     case 'settings': renderSettings(); break;
   }
 }
@@ -609,8 +610,7 @@ function parseNoteJson(text) {
 }
 
 async function noteFromImage() {
-  if (!aiReady()) { toast('Primero activa la IA local'); go('settings'); return; }
-  if (!modelInstalled(currentChatModel())) { toast('El modelo de este modo no está descargado. Instálalo en Ajustes → IA local.'); go('settings'); return; }
+  if (!aiReady()) { toast('Configura tu clave de OpenRouter en Ajustes.'); go('settings'); return; }
   const file = await pickImageFile();
   if (!file) return;
   const btn = $('#notes-image');
@@ -623,7 +623,7 @@ async function noteFromImage() {
       content: 'Eres un asistente que digitaliza documentos para una app de pastoral escolar. Observa la imagen y devuelve ÚNICAMENTE un objeto JSON válido, sin comentarios ni bloques de código, con las claves: "title" (título breve y descriptivo), "body" (contenido completo en Markdown, respetando títulos, listas, fechas y nombres), "tags" (array de 1 a 5 etiquetas en minúsculas). No inventes información que no aparezca en la imagen.'
     };
     const user = { role: 'user', content: 'Convierte el contenido de esta imagen en una nota.', images: [dataUrl] };
-    const res = await api.aiChat({ url: state.settings.ollamaUrl, model: currentChatModel(), messages: [system, user] });
+    const res = await api.aiCloudChat({ format: 'openai', baseUrl: OPENROUTER_URL, apiKey: cloudCfg().apiKey, model: cloudCfg().model, messages: [system, user] });
     if (!res || !res.ok) { toast('No se pudo analizar la imagen' + (res && res.error ? ': ' + res.error : '')); return; }
     openNote(null, null, parseNoteJson(res.content));
     toast('Revisa y guarda la nota');
@@ -936,182 +936,132 @@ const AI_TOOLS = [
     }
   }
 ];
-function aiReady() {
-  return aiMgr.running && (aiMgr.models || []).length > 0;
+function cloudCfg() {
+  const c = state.settings.cloud || {};
+  return { apiKey: (c.apiKey || '').trim(), model: (c.model || '').trim() };
 }
 
-function currentChatModel() {
-  return CHAT_MODELS[state.settings.chatMode === 'deep' ? 'deep' : 'daily'].model;
+function cloudReady() {
+  const c = cloudCfg();
+  return !!c.apiKey && !!c.model;
 }
 
-function modelInstalled(name) {
-  return (aiMgr.models || []).includes(name);
-}
+function aiReady() { return cloudReady(); }
+
+function currentChatModel() { return cloudCfg().model; }
 
 async function callModel(messages, requestId) {
-  return await api.aiChat({ url: state.settings.ollamaUrl, model: currentChatModel(), messages, tools: AI_TOOLS, requestId });
+  const c = cloudCfg();
+  return await api.aiCloudChat({ format: 'openai', baseUrl: OPENROUTER_URL, apiKey: c.apiKey, model: c.model, messages, tools: AI_TOOLS, requestId });
 }
 
-async function refreshAiManager() {
-  try { aiMgr = await api.aiManagerStatus(); } catch (e) { /* noop */ }
-  updateChatModeUi();
-  updateAiUi();
-  renderAiModels();
+const CLOUD_FORMS = { set: 'set-cloud-', setup: 'setup-cloud-' };
+
+function cloudEl(form, key) {
+  return $('#' + CLOUD_FORMS[form] + key);
 }
 
-function updateChatModeUi() {
-  const sel = $('#chat-mode');
-  if (sel) sel.value = state.settings.chatMode === 'deep' ? 'deep' : 'daily';
+function fillCloudModels(form, models) {
+  const list = cloudEl(form, 'modellist');
+  if (!list) return;
+  list.innerHTML = (models || []).map((m) => `<option value="${esc(m)}"></option>`).join('');
 }
 
-function updateAiUi() {
+function updateCloudStatus(form, text, kind) {
+  const st = cloudEl(form, 'status');
+  if (!st) return;
+  if (text) { st.className = 'pill ' + (kind || ''); st.textContent = text; return; }
+  const c = cloudCfg();
+  if (c.apiKey && c.model) { st.className = 'pill ok'; st.textContent = 'Configurada'; }
+  else if (c.apiKey || c.model) { st.className = 'pill warn'; st.textContent = 'Incompleta'; }
+  else { st.className = 'pill'; st.textContent = 'Sin configurar'; }
+}
+
+function populateCloudForm(form) {
+  const c = state.settings.cloud || {};
+  const key = cloudEl(form, 'apikey'); if (key) key.value = c.apiKey || '';
+  const model = cloudEl(form, 'model'); if (model) model.value = c.model || '';
+  updateCloudStatus(form);
+}
+
+function populateAllCloudForms() {
+  Object.keys(CLOUD_FORMS).forEach((f) => populateCloudForm(f));
+}
+
+async function saveCloudForm(form) {
+  const val = (key) => { const el = cloudEl(form, key); return el ? el.value : ''; };
+  state.settings.cloud = {
+    apiKey: val('apikey').trim(),
+    model: val('model').trim()
+  };
+  populateAllCloudForms();
+  updateAssistantUi();
+  await persist();
+}
+
+async function testCloudForm(form) {
+  await saveCloudForm(form);
+  const c = cloudCfg();
+  if (!c.apiKey) { toast('Indica tu clave de OpenRouter'); return; }
+  if (!c.model) { toast('Indica el modelo'); return; }
+  updateCloudStatus(form, 'Probando...', 'warn');
+  const r = await api.aiCloudTest({ format: 'openai', baseUrl: OPENROUTER_URL, apiKey: c.apiKey, model: c.model });
+  if (r && r.ok) {
+    updateCloudStatus(form, 'Conexión correcta', 'ok');
+    if (r.models && r.models.length) fillCloudModels(form, r.models);
+    toast((r.models && r.models.length) ? ('Conexión correcta · ' + r.models.length + ' modelos') : 'Conexión correcta');
+  } else {
+    updateCloudStatus(form, 'Error', 'red');
+    toast('No se pudo conectar: ' + ((r && r.error) || 'error'));
+  }
+}
+
+async function listCloudModelsFrom(form) {
+  await saveCloudForm(form);
+  const c = cloudCfg();
+  if (!c.apiKey) { toast('Indica tu clave de OpenRouter'); return; }
+  const r = await api.aiCloudModels({ format: 'openai', baseUrl: OPENROUTER_URL, apiKey: c.apiKey });
+  if (r && r.ok && (r.models || []).length) { fillCloudModels(form, r.models); toast(r.models.length + ' modelos encontrados'); }
+  else toast('No se pudieron obtener los modelos' + ((r && r.error) ? ': ' + r.error : ''));
+}
+
+function bindCloudForm(form) {
+  const onChange = () => saveCloudForm(form);
+  ['apikey', 'model'].forEach((f) => {
+    const el = cloudEl(form, f);
+    if (el) el.addEventListener('change', onChange);
+  });
+  const testBtn = cloudEl(form, 'test');
+  if (testBtn) testBtn.addEventListener('click', () => testCloudForm(form));
+  const modelsBtn = cloudEl(form, 'models');
+  if (modelsBtn) modelsBtn.addEventListener('click', () => listCloudModelsFrom(form));
+}
+
+function updateAssistantUi() {
   const chip = $('#ai-chip');
   const chat = $('#chat-box');
   const setup = $('#ai-setup');
-  const engineStep = $('#step-engine');
-  const modelStep = $('#step-model');
-  const installed = aiMgr.installed;
-  const running = aiMgr.running;
-  const hasModel = (aiMgr.models || []).length > 0;
-  const ready = running && hasModel;
-  const selectedReady = ready && modelInstalled(currentChatModel());
+  const ready = cloudReady();
 
-  chat.classList.toggle('hidden', !ready);
-  setup.classList.toggle('hidden', ready);
-  const modeSel = $('#chat-mode');
-  if (modeSel) modeSel.classList.toggle('hidden', !ready);
+  if (chat) chat.classList.toggle('hidden', !ready);
+  if (setup) {
+    if (!ready && setup.classList.contains('hidden')) populateCloudForm('setup');
+    setup.classList.toggle('hidden', ready);
+  }
 
-  if (selectedReady) { chip.className = 'pill ok'; chip.textContent = '● IA lista'; }
-  else if (ready) { chip.className = 'pill warn'; chip.textContent = '● Falta el modelo elegido'; }
-  else if (running) { chip.className = 'pill warn'; chip.textContent = '● Falta el modelo'; }
-  else if (installed) { chip.className = 'pill warn'; chip.textContent = '● IA detenida'; }
-  else { chip.className = 'pill red'; chip.textContent = '● IA no instalada'; }
+  if (chip) {
+    if (ready) { chip.className = 'pill ok'; chip.textContent = '● IA lista'; }
+    else { chip.className = 'pill warn'; chip.textContent = '● Falta configurar'; }
+  }
 
-  engineStep.classList.toggle('done', installed);
-  $('#step-engine-desc').textContent = installed ? 'Instalado' : 'Pendiente';
-  $('#btn-install').textContent = installed ? 'Reparar' : 'Instalar';
+  const sub = $('#ai-subtitle');
+  if (sub) sub.textContent = 'Usando OpenRouter (modelo por internet)';
 
-  modelStep.classList.toggle('done', hasModel);
-  $('#btn-pull').disabled = !installed;
-  const setPull = $('#set-ai-pull');
-  if (setPull) setPull.disabled = !installed;
-}
-
-function setAiStatusText(text) {
-  ['#ai-progress-text', '#set-ai-progress'].forEach((sel) => {
-    const el = $(sel);
-    if (el) el.textContent = text;
-  });
-}
-
-function setBar(id, percent) {
-  const bar = $('#' + id);
-  if (!bar) return;
-  bar.classList.remove('hidden');
-  const fill = bar.querySelector('.bar-fill');
-  if (fill) fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
-}
-
-function hideBars() {
-  ['bar-engine', 'bar-model', 'bar-model-set'].forEach((id) => {
-    const bar = $('#' + id);
-    if (bar) bar.classList.add('hidden');
-  });
-}
-
-function handleAiProgress(d) {
-  setAiStatusText(d.status || '');
   const badge = $('#ai-badge');
-  if (d.phase === 'download' || d.phase === 'extract') {
-    setBar('bar-engine', d.percent || 0);
-    if (badge) { badge.className = 'ai-badge busy'; badge.textContent = '● Instalando IA...'; }
-  } else if (d.phase === 'pull') {
-    setBar('bar-model', d.percent || 0);
-    setBar('bar-model-set', d.percent || 0);
-    if (badge) { badge.className = 'ai-badge busy'; badge.textContent = '● Bajando modelo...'; }
-  } else if (d.phase === 'done') {
-    hideBars();
-    refreshAiManager(); checkAi();
-  } else if (d.phase === 'error') {
-    hideBars();
-    toast(d.status || 'Error al preparar la IA');
-    refreshAiManager();
+  if (badge) {
+    if (ready) { badge.className = 'ai-badge online'; badge.textContent = '● IA conectada'; }
+    else { badge.className = 'ai-badge offline'; badge.textContent = '● IA sin configurar'; }
   }
-}
-
-async function installAi(force) {
-  const btn = $('#btn-install');
-  if (btn) btn.disabled = true;
-  const btnPull = $('#btn-pull');
-  if (btnPull) btnPull.disabled = true;
-  setAiStatusText('Iniciando instalación...');
-  const res = await api.aiInstall(force);
-  if (btn) btn.disabled = false;
-  await refreshAiManager();
-  await checkAi();
-  if (res.ok) toast('Motor de IA instalado');
-  else toast('Error: ' + res.error);
-}
-
-async function pullModel(selectEl, buttonEl, progressEl) {
-  const select = selectEl || $('#model-choice');
-  const button = buttonEl || $('#btn-pull');
-  const model = select && select.value;
-  if (!model || !model.trim()) { toast('Elige un modelo'); return; }
-  if (button) button.disabled = true;
-  const progressText = progressEl || $('#ai-progress-text');
-  if (progressText) progressText.textContent = 'Iniciando descarga del modelo...';
-  const res = await api.aiPull(model);
-  hideBars();
-  if (!res.ok) { if (button) button.disabled = false; toast('Error: ' + res.error); await refreshAiManager(); return; }
-  await refreshAiManager();
-  await checkAi();
-  toast('Modelo listo');
-}
-
-function modelLabel(name) {
-  const known = {
-    'gemma4:12b': 'Gemma 4 12B — chat diario',
-    'qwen3.5:9b': 'Qwen 3.5 9B — chat profundo',
-    'llama3.2': 'Llama 3.2 3B — ligero'
-  };
-  return known[name] || name;
-}
-
-function renderAiModels() {
-  const wrap = $('#set-ai-models');
-  if (!wrap) return;
-  const models = aiMgr.models || [];
-  if (!models.length) {
-    wrap.innerHTML = '<div class="empty">Todavía no hay modelos descargados. Instala el motor y descarga el que prefieras.</div>';
-  } else {
-    wrap.innerHTML = models.map((m) => `
-      <div class="list-item" style="cursor:default">
-        <div class="li-main">
-          <div class="li-title">${esc(modelLabel(m))}</div>
-          <div class="li-sub">${esc(m)}</div>
-        </div>
-        <button class="btn danger" data-delmodel="${esc(m)}">Borrar</button>
-      </div>`).join('');
-  }
-  const sel = $('#set-model-choice');
-  if (sel) {
-    Array.from(sel.options).forEach((opt) => {
-      const base = opt.dataset.base || opt.textContent.replace(/ · descargado$/, '');
-      opt.dataset.base = base;
-      opt.textContent = base + (models.includes(opt.value) ? ' · descargado' : '');
-    });
-  }
-}
-
-async function deleteAiModel(model) {
-  if (!model) return;
-  if (!confirm('¿Borrar el modelo "' + model + '"? Podrás volver a descargarlo cuando quieras.')) return;
-  const res = await api.aiDelete(model);
-  if (!res.ok) { toast('Error: ' + res.error); return; }
-  await refreshAiManager();
-  await checkAi();
-  toast('Modelo borrado');
 }
 
 function thinkingHTML() {
@@ -1418,7 +1368,8 @@ function clearAttachments() {
 function buildSystemPrompt() {
   return {
     role: 'system',
-    content: `Eres el asistente de la pastoral de un colegio${state.settings.schoolName ? ' (' + state.settings.schoolName + ')' : ''}${state.settings.pastorName ? ', responsable ' + state.settings.pastorName : ''}. ` +
+    content: `Eres un asistente de IA que ayuda a organizar la pastoral de un colegio${state.settings.schoolName ? ' (' + state.settings.schoolName + ')' : ''}. ` +
+      `${state.settings.pastorName ? `Quien usa la app es ${state.settings.pastorName}; trátalo como el usuario. Tú NO eres ${state.settings.pastorName} ni ninguna persona real: no te identifiques con su nombre ni asumas su identidad. ` : ''}` +
       `Ayudas a organizar ideas, eventos, retiros, campañas, tareas, grupos y personas. Responde en español, de forma práctica, cálida y concisa. ` +
       `Escribe tus respuestas en formato Markdown (negritas, listas, títulos con #, tablas cuando aporten claridad): la app lo mostrará con estilo. ` +
       `El usuario puede adjuntar imágenes: si recibes una, descríbela e interprétala con atención (textos, listas, fechas, personas, horarios) y úsala para ayudarle. ` +
@@ -1455,7 +1406,7 @@ async function runAssistantTurn() {
       const res = await callModel(messages, ui.chatRequestId);
       if (res.canceled) { ui.chatCanceled = true; break; }
       if (!res.ok) {
-        finalContent = `⚠ No se pudo conectar con la IA local.\n\n${res.error}\n\nRevisa que el motor esté en marcha (Ajustes / IA local).`;
+        finalContent = `⚠ No se pudo conectar con la IA en la nube.\n\n${res.error}\n\nRevisa tu clave y el modelo en Ajustes → IA en la nube.`;
         break;
       }
       const calls = res.tool_calls || [];
@@ -1490,12 +1441,7 @@ async function sendChat(text) {
   const hasImages = ui.attached.length > 0;
   if (ui.chatBusy || (!text.trim() && !hasImages)) return;
   if (!aiReady()) {
-    toast('Primero activa la IA local');
-    go('settings');
-    return;
-  }
-  if (!modelInstalled(currentChatModel())) {
-    toast('El modelo de este modo no está descargado. Instálalo en Ajustes → IA local.');
+    toast('Configura tu clave de OpenRouter en Ajustes.');
     go('settings');
     return;
   }
@@ -1509,12 +1455,7 @@ async function sendChat(text) {
 async function regenerate() {
   if (ui.chatBusy) return;
   if (!aiReady()) {
-    toast('Primero activa la IA local');
-    go('settings');
-    return;
-  }
-  if (!modelInstalled(currentChatModel())) {
-    toast('El modelo de este modo no está descargado. Instálalo en Ajustes → IA local.');
+    toast('Configura tu clave de OpenRouter en Ajustes.');
     go('settings');
     return;
   }
@@ -1544,13 +1485,7 @@ async function renderSettings() {
   if (welcomeEl) welcomeEl.checked = state.settings.showWelcome !== false;
   try { $('#set-datapath').textContent = await api.dataPath(); } catch (e) { /* noop */ }
   try { $('#set-version').textContent = 'Versión ' + await api.appVersion(); } catch (e) { /* noop */ }
-  await refreshAiManager();
-  const st = $('#set-ai-state');
-  if (aiMgr.running && (aiMgr.models || []).length) { st.className = 'pill ok'; st.textContent = 'Lista · ' + aiMgr.models.length + ' modelo(s)'; }
-  else if (aiMgr.running) { st.className = 'pill warn'; st.textContent = 'Encendida, sin modelos'; }
-  else if (aiMgr.installed) { st.className = 'pill warn'; st.textContent = 'Detenida'; }
-  else { st.className = 'pill red'; st.textContent = 'No instalada'; }
-  $('#set-ai-dir').textContent = 'Carpeta de IA: ' + (aiMgr.dataDir || '');
+  populateCloudForm('set');
   renderBackups();
 }
 
@@ -1595,19 +1530,6 @@ async function renderBackups() {
       <button class="btn small" data-restore="${esc(b.name)}">Restaurar</button>
       <button class="icon-btn" data-delbackup="${esc(b.name)}" title="Eliminar">✕</button>
     </div>`).join('') : `<div class="empty">Todavía no hay copias</div>`;
-}
-
-async function checkAi() {
-  const badge = $('#ai-badge');
-  const st = await api.aiStatus(state.settings.ollamaUrl);
-  if (st.online) {
-    badge.className = 'ai-badge online';
-    badge.textContent = '● IA conectada';
-    return st;
-  }
-  badge.className = 'ai-badge offline';
-  badge.textContent = '● IA desconectada';
-  return st;
 }
 
 /* ------------------------------------------------------------
@@ -1980,8 +1902,7 @@ function showGoodbye() {
    ------------------------------------------------------------ */
 function useAiExample(text) {
   go('assistant');
-  const ready = aiMgr.running && (aiMgr.models || []).length > 0;
-  if (!ready) { toast('Primero activa la IA en el asistente'); return; }
+  if (!cloudReady()) { toast('Configura tu clave de OpenRouter en Ajustes.'); go('settings'); return; }
   setTimeout(() => sendChat(text), 60);
 }
 
@@ -2019,9 +1940,6 @@ function bindEvents() {
 
     const delBackup = e.target.closest('[data-delbackup]');
     if (delBackup) { deleteBackup(delBackup.dataset.delbackup); return; }
-
-    const delModel = e.target.closest('[data-delmodel]');
-    if (delModel) { deleteAiModel(delModel.dataset.delmodel); return; }
 
     const goto = e.target.closest('[data-goto]');
     if (goto) { go(goto.dataset.goto); return; }
@@ -2149,28 +2067,9 @@ function bindEvents() {
   });
   api.onAiStream(handleAiStream);
 
-  // Settings / IA
-  $('#btn-install').addEventListener('click', () => installAi(!!aiMgr.installed));
-  $('#btn-pull').addEventListener('click', () => pullModel($('#model-choice'), $('#btn-pull'), $('#ai-progress-text')));
-  $('#set-ai-pull').addEventListener('click', () => pullModel($('#set-model-choice'), $('#set-ai-pull'), $('#set-ai-progress')));
-  $('#set-ai-install').addEventListener('click', () => installAi(!!aiMgr.installed));
-  $('#set-ai-start').addEventListener('click', async () => {
-    await api.aiStart(); await refreshAiManager(); await checkAi(); toast('IA iniciada');
-  });
-  $('#set-ai-stop').addEventListener('click', async () => {
-    await api.aiStop(); await refreshAiManager(); await checkAi(); toast('IA detenida');
-  });
-  $('#set-ai-uninstall').addEventListener('click', async () => {
-    if (!confirm('¿Desinstalar la IA? Se borrarán el motor y los modelos descargados.')) return;
-    await api.aiUninstall(); await refreshAiManager(); await checkAi(); toast('IA desinstalada');
-  });
-  $('#chat-mode').addEventListener('change', async (e) => {
-    state.settings.chatMode = e.target.value === 'deep' ? 'deep' : 'daily';
-    await persist();
-    updateChatModeUi();
-    updateAiUi();
-    toast(state.settings.chatMode === 'deep' ? 'Modelo: Qwen 3.5 9B (profundo)' : 'Modelo: Gemma 4 12B (diario)');
-  });
+  // Settings / IA en la nube
+  bindCloudForm('set');
+  bindCloudForm('setup');
   $('#set-reveal').addEventListener('click', () => api.revealData());
   $('#set-export').addEventListener('click', async () => {
     const out = await api.exportBackup(state);
@@ -2259,12 +2158,8 @@ async function init() {
   bindEvents();
   if (api.onClosing) api.onClosing(showGoodbye);
   showWelcome();
-  api.onAiProgress(handleAiProgress);
   go('dashboard');
-  checkAi();
-  refreshAiManager();
-  setInterval(checkAi, 30000);
-  setInterval(refreshAiManager, 60000);
+  updateAssistantUi();
   setInterval(() => { if (ui.view === 'dashboard') renderDashboard(); }, 60000);
   checkNotifications();
   setInterval(checkNotifications, 60000);
