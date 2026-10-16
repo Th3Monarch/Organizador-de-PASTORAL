@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
   <title>Organizador Pastoral</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -115,12 +115,16 @@
               <option value="acta">Acta</option>
               <option value="retreat">Planificación de retiro</option>
             </select>
+            <button class="btn" id="notes-image" title="Crear una nota a partir de una imagen con la IA">📷 Desde imagen</button>
             <button class="btn primary" data-new="note">+ Nueva nota</button>
           </div>
         </header>
         <div class="toolbar">
           <input type="search" id="notes-search" placeholder="Buscar en notas..." />
           <select id="notes-tag"><option value="">Todas las etiquetas</option></select>
+          <span class="spacer"></span>
+          <button class="btn" id="notes-print" title="Imprimir o guardar como PDF">PDF</button>
+          <button class="btn" id="notes-csv" title="Exportar a CSV (Excel)">CSV</button>
         </div>
         <div id="notes-grid" class="cards"></div>
       </section>
@@ -141,6 +145,7 @@
           <button class="btn" id="events-print" title="Imprimir o guardar como PDF">PDF</button>
           <input type="search" id="events-search" placeholder="Buscar evento..." />
         </div>
+        <div id="lit-banner" class="lit-banner hidden"></div>
         <div class="card cal-card">
           <div class="cal-weekdays">
             <span>Lun</span><span>Mar</span><span>Mié</span><span>Jue</span><span>Vie</span><span>Sáb</span><span>Dom</span>
@@ -176,6 +181,8 @@
         <header class="view-head">
           <div><h1>Comunidad</h1><p class="muted">Grupos y personas de la pastoral</p></div>
           <div class="head-actions">
+            <button class="btn" id="community-print" title="Imprimir o guardar como PDF">PDF</button>
+            <button class="btn" id="community-csv" title="Exportar a CSV (Excel)">CSV</button>
             <button class="btn" data-new="group">+ Grupo</button>
             <button class="btn primary" data-new="person">+ Persona</button>
           </div>
@@ -189,10 +196,13 @@
       <!-- ASSISTANT -->
       <section class="view hidden" id="view-assistant">
         <header class="view-head">
-          <div><h1>Asistente IA</h1><p class="muted">Funciona sin internet, directo en tu computadora</p></div>
+          <div><h1>Asistente IA</h1><p class="muted">Funciona sin conexión, en tu equipo</p></div>
           <div class="head-actions">
             <span id="ai-chip" class="pill">Comprobando...</span>
-            <select id="chat-model" class="small"></select>
+            <select id="chat-mode" class="small" title="Elige el modelo del chat">
+              <option value="daily">Diario · Gemma 4 12B</option>
+              <option value="deep">Profundo · Qwen 3.5 9B</option>
+            </select>
             <button class="btn" id="chat-clear">Limpiar</button>
           </div>
         </header>
@@ -214,10 +224,9 @@
             <div class="step-body">
               <strong>Modelo de lenguaje</strong>
               <select id="model-choice">
-                <option value="llama3.2:1b">Llama 3.2 1B — ligero (~1.3 GB)</option>
-                <option value="llama3.2" selected>Llama 3.2 3B — recomendado (~2 GB)</option>
-                <option value="qwen2.5:1.5b">Qwen 2.5 1.5B — ligero (~1 GB)</option>
-                <option value="qwen2.5:3b">Qwen 2.5 3B — buena calidad (~1.9 GB)</option>
+                <option value="gemma4:12b" selected>Gemma 4 12B — chat diario (~8 GB)</option>
+                <option value="qwen3.5:9b">Qwen 3.5 9B — chat profundo (~6 GB)</option>
+                <option value="llama3.2">Llama 3.2 3B — ligero (~2 GB)</option>
               </select>
               <div class="bar hidden" id="bar-model"><div class="bar-fill"></div></div>
             </div>
@@ -239,8 +248,12 @@
             <button data-prompt="Muéstrame mis tareas pendientes y próximos eventos.">📋 Mis pendientes</button>
             <button data-summary="week">🗓 Resumen de la semana</button>
           </div>
+          <div class="chat-attach hidden" id="chat-attach-preview"></div>
           <form class="chat-input" id="chat-form">
-            <textarea id="chat-text" rows="1" placeholder="Escribe tu mensaje... (Enter para enviar)"></textarea>
+            <button class="icon-btn attach-btn" type="button" id="chat-attach" title="Adjuntar imagen">🖼️</button>
+            <input type="file" id="chat-file" accept="image/*" multiple hidden />
+            <textarea id="chat-text" rows="1" placeholder="Escribe tu mensaje... (Enter para enviar · puedes adjuntar o pegar imágenes)"></textarea>
+            <button class="btn stop hidden" type="button" id="chat-stop">Detener</button>
             <button class="btn primary" type="submit" id="chat-send">Enviar</button>
           </form>
         </div>
@@ -259,6 +272,8 @@
               <option value="dark">Oscuro</option>
             </select>
           </label>
+          <label class="check-row"><input type="checkbox" id="set-notify" /> Avisos del sistema (notificaciones de Windows)</label>
+          <label class="check-row"><input type="checkbox" id="set-welcome" /> Mostrar pantalla de bienvenida al iniciar</label>
         </div>
         <div class="card">
           <h2>IA local</h2>
@@ -340,6 +355,42 @@
   <div id="print-area"></div>
 
   <div id="toast" class="toast hidden"></div>
+
+  <!-- PANTALLA DE INICIO (bienvenida) -->
+  <div class="welcome-overlay" id="welcome">
+    <div class="welcome-card">
+      <div class="welcome-logo">✝</div>
+      <h1 class="welcome-title">Organizador Pastoral</h1>
+      <p class="welcome-school" id="welcome-school">Pastoral Escolar</p>
+      <p class="welcome-greet" id="welcome-greet">La paz sea contigo</p>
+      <div class="welcome-meta">
+        <span class="welcome-date" id="welcome-date"></span>
+        <span class="pill lit hidden" id="welcome-lit"></span>
+      </div>
+      <blockquote class="welcome-verse">
+        <p id="welcome-verse-text"></p>
+        <cite id="welcome-verse-ref"></cite>
+      </blockquote>
+      <button class="btn primary welcome-enter" id="welcome-enter">Comenzar</button>
+      <label class="check-row welcome-skip"><input type="checkbox" id="welcome-dont-show" /> No volver a mostrar la bienvenida</label>
+      <p class="welcome-hint muted">Pulsa Enter para entrar</p>
+    </div>
+  </div>
+
+  <!-- PANTALLA DE IDA (despedida) -->
+  <div class="goodbye-overlay hidden" id="goodbye">
+    <div class="goodbye-card">
+      <div class="goodbye-logo">✝</div>
+      <h1 class="goodbye-title">Ve en paz</h1>
+      <p class="goodbye-sub" id="goodbye-sub">Que el Señor te acompañe y te guarde.</p>
+      <blockquote class="goodbye-verse">
+        <p id="goodbye-verse-text"></p>
+        <cite id="goodbye-verse-ref"></cite>
+      </blockquote>
+      <button class="btn primary" id="goodbye-close">Cerrar ahora</button>
+      <div class="goodbye-bar"><div class="goodbye-bar-fill" id="goodbye-bar"></div></div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

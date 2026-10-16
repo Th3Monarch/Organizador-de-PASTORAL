@@ -1,10 +1,12 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const ai = require('./ai-manager');
 
 let mainWindow = null;
 let dataFilePath = null;
+const activeChatAborts = new Map();
+let allowClose = false;
 
 const EMPTY_DATA = {
   notes: [],
@@ -130,6 +132,16 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  mainWindow.on('close', (e) => {
+    if (allowClose) return;
+    e.preventDefault();
+    try { mainWindow.webContents.send('app:closing'); } catch (err) { /* noop */ }
+    setTimeout(() => {
+      allowClose = true;
+      try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close(); } catch (err) { /* noop */ }
+    }, 8000);
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http://') || url.startsWith('https://')) {
       shell.openExternal(url);
@@ -139,6 +151,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') app.setAppUserModelId('com.pastoral.organizador');
   ensureDataFile();
   backupDaily();
 
@@ -150,6 +163,25 @@ app.whenReady().then(() => {
   ipcMain.handle('data:save', (_evt, data) => writeData(data));
   ipcMain.handle('data:path', () => dataFilePath);
   ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:confirm-quit', () => {
+    allowClose = true;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+    return true;
+  });
+  ipcMain.handle('notify', (_evt, payload) => {
+    try {
+      if (!Notification.isSupported()) return false;
+      const { title, body } = payload || {};
+      new Notification({
+        title: String(title || 'Organizador Pastoral'),
+        body: String(body || ''),
+        icon: path.join(__dirname, 'build', 'icon.png')
+      }).show();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
   ipcMain.handle('data:reveal', () => {
     shell.showItemInFolder(dataFilePath);
     return true;
@@ -218,28 +250,69 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('ai:chat', async (_evt, payload) => {
-    const { url, model, messages, tools } = payload || {};
+  ipcMain.handle('ai:chat', async (evt, payload) => {
+    const { url, model, messages, tools, requestId } = payload || {};
     const base = (url || ai.OLLAMA_URL).replace(/\/$/, '');
+    let ctrl = null;
+    let signal = AbortSignal.timeout(180000);
+    if (requestId) {
+      ctrl = new AbortController();
+      activeChatAborts.set(requestId, ctrl);
+      signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([ctrl.signal, signal]) : ctrl.signal;
+    }
+    const onDelta = (delta) => { try { evt.sender.send('ai:stream', { requestId, delta }); } catch (e) { /* noop */ } };
     try {
-      const body = { model, messages, stream: false };
+      const apiMessages = (messages || []).map((m) => {
+        if (!m || !Array.isArray(m.images) || !m.images.length) return m;
+        return { ...m, images: m.images.map((s) => String(s).replace(/^data:[^,]*,/, '')) };
+      });
+      const body = { model, messages: apiMessages, stream: true };
       if (tools && tools.length) body.tools = tools;
       const res = await fetch(`${base}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(180000)
+        signal
       });
       if (!res.ok) {
         const txt = await res.text();
         return { ok: false, error: `HTTP ${res.status}: ${txt}` };
       }
-      const json = await res.json();
-      const msg = json.message || {};
-      return { ok: true, content: msg.content || '', tool_calls: msg.tool_calls || [] };
+      // Ollama emite NDJSON (una línea JSON por fragmento)
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let content = '';
+      const tool_calls = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          const s = line.trim();
+          if (!s) continue;
+          let obj;
+          try { obj = JSON.parse(s); } catch (e) { continue; }
+          if (obj.error) return { ok: false, error: String(obj.error) };
+          const msg = obj.message || {};
+          if (msg.content) { content += msg.content; onDelta(msg.content); }
+          if (Array.isArray(msg.tool_calls)) tool_calls.push(...msg.tool_calls);
+        }
+      }
+      return { ok: true, content, tool_calls };
     } catch (err) {
+      if (ctrl && ctrl.signal.aborted) return { ok: false, canceled: true, error: 'Respuesta detenida por el usuario.' };
       return { ok: false, error: String(err.message || err) };
+    } finally {
+      if (requestId) activeChatAborts.delete(requestId);
     }
+  });
+
+  ipcMain.on('ai:cancel', (_evt, requestId) => {
+    const c = activeChatAborts.get(requestId);
+    if (c) { try { c.abort(); } catch (e) { /* noop */ } }
   });
 
   createWindow();
@@ -258,5 +331,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  allowClose = true;
   ai.stopServer();
 });

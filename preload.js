@@ -5,6 +5,13 @@ contextBridge.exposeInMainWorld('pastoral', {
   save: (data) => ipcRenderer.invoke('data:save', data),
   dataPath: () => ipcRenderer.invoke('data:path'),
   appVersion: () => ipcRenderer.invoke('app:version'),
+  confirmQuit: () => ipcRenderer.invoke('app:confirm-quit'),
+  onClosing: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('app:closing', handler);
+    return () => ipcRenderer.removeListener('app:closing', handler);
+  },
+  notify: (payload) => ipcRenderer.invoke('notify', payload),
   revealData: () => ipcRenderer.invoke('data:reveal'),
   exportBackup: (data) => ipcRenderer.invoke('data:export', data),
 
@@ -16,6 +23,12 @@ contextBridge.exposeInMainWorld('pastoral', {
 
   aiStatus: (url) => ipcRenderer.invoke('ai:status', url),
   aiChat: (payload) => ipcRenderer.invoke('ai:chat', payload),
+  aiCancel: (requestId) => ipcRenderer.send('ai:cancel', requestId),
+  onAiStream: (cb) => {
+    const handler = (_evt, data) => cb(data);
+    ipcRenderer.on('ai:stream', handler);
+    return () => ipcRenderer.removeListener('ai:stream', handler);
+  },
 
   aiManagerStatus: () => ipcRenderer.invoke('ai:manager-status'),
   aiInstall: (force) => ipcRenderer.invoke('ai:install', force),

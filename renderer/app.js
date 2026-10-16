@@ -4,11 +4,16 @@
 
 const api = window.pastoral;
 
+const CHAT_MODELS = {
+  daily: { model: 'gemma4:12b', label: 'Diario · Gemma 4 12B' },
+  deep: { model: 'qwen3.5:9b', label: 'Profundo · Qwen 3.5 9B' }
+};
+
 let state = {
   notes: [], events: [], tasks: [], groups: [], persons: [], chat: [],
   settings: {
     pastorName: '', schoolName: '',
-    ollamaUrl: 'http://127.0.0.1:11434', model: 'llama3.2', theme: 'light'
+    ollamaUrl: 'http://127.0.0.1:11434', theme: 'light', chatMode: 'daily', notify: true, showWelcome: true
   }
 };
 
@@ -18,9 +23,17 @@ let ui = {
   calSelected: toKey(new Date()),
   taskFilter: 'all',
   chatBusy: false,
+  chatThinking: null,
+  chatTimer: null,
+  chatRequestId: null,
+  chatCanceled: false,
+  streamText: '',
+  streamRaf: null,
+  attached: [],
   remindersHidden: false,
   searchSel: 0,
-  searchItems: []
+  searchItems: [],
+  notified: {}
 };
 
 let aiMgr = { installed: false, running: false, models: [], exe: null, dataDir: '', port: 11434 };
@@ -35,6 +48,144 @@ function esc(str) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
+/* ------------------------------------------------------------
+   Render de Markdown (seguro y sin dependencias)
+   El texto se escapa antes de aplicar el formato, así que
+   nunca se inyecta HTML del modelo.
+   ------------------------------------------------------------ */
+let mdCodeBlocks = [];
+
+function mdInline(s) {
+  s = s.replace(/\u0000C(\d+)\u0000/g, (m, n) => `<code>${esc(mdCodeBlocks[Number(n)] || '')}</code>`);
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, url) => `<img alt="${alt}" src="${/^https?:/i.test(url) ? url : ''}" />`);
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t, url) => {
+    const href = /^(https?:|mailto:)/i.test(url) ? url : '#';
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${t}</a>`;
+  });
+  s = s.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  s = s.replace(/(^|[^_\w])_([^_\n]+)_/g, '$1<em>$2</em>');
+  s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+  return s.replace(/\n/g, '<br />');
+}
+
+function mdListItem(line) {
+  const m = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+  if (!m) return null;
+  return { indent: m[1].replace(/\t/g, '  ').length, ordered: /\d/.test(m[2]), text: m[3] };
+}
+
+function mdRenderList(lines, start) {
+  const first = mdListItem(lines[start]);
+  const baseIndent = first.indent;
+  const ordered = first.ordered;
+  const items = [];
+  let i = start;
+  while (i < lines.length) {
+    const it = mdListItem(lines[i]);
+    if (!it || it.indent < baseIndent) break;
+    if (it.indent > baseIndent) {
+      if (!items.length) break;
+      const nested = mdRenderList(lines, i);
+      items[items.length - 1].children.push(nested.html);
+      i = nested.next;
+      continue;
+    }
+    if (it.ordered !== ordered) break;
+    items.push({ text: it.text, children: [] });
+    i++;
+  }
+  const tag = ordered ? 'ol' : 'ul';
+  const body = items.map((it) => `<li>${mdInline(esc(it.text))}${it.children.join('')}</li>`).join('');
+  return { html: `<${tag}>${body}</${tag}>`, next: i };
+}
+
+function mdRenderTable(rows) {
+  const cells = (r) => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+  const header = cells(rows[0]);
+  const aligns = cells(rows[1]).map((c) => (c.startsWith(':') && c.endsWith(':')) ? 'center' : c.endsWith(':') ? 'right' : c.startsWith(':') ? 'left' : '');
+  let html = '<table><thead><tr>';
+  header.forEach((c, k) => { html += `<th${aligns[k] ? ` style="text-align:${aligns[k]}"` : ''}>${mdInline(esc(c))}</th>`; });
+  html += '</tr></thead><tbody>';
+  for (let r = 2; r < rows.length; r++) {
+    const row = cells(rows[r]);
+    html += '<tr>';
+    header.forEach((_, k) => { html += `<td${aligns[k] ? ` style="text-align:${aligns[k]}"` : ''}>${mdInline(esc(row[k] || ''))}</td>`; });
+    html += '</tr>';
+  }
+  return html + '</tbody></table>';
+}
+
+function renderMarkdown(src) {
+  if (src == null) return '';
+  let text = String(src).replace(/\r\n?/g, '\n');
+  mdCodeBlocks = [];
+  text = text.replace(/```[^\n]*\n?([\s\S]*?)```/g, (m, c) => {
+    const idx = mdCodeBlocks.length;
+    mdCodeBlocks.push(c.replace(/\n$/, ''));
+    return `\u0000C${idx}\u0000`;
+  });
+
+  const lines = text.split('\n');
+  const html = [];
+  let para = [];
+  const flush = () => {
+    if (!para.length) return;
+    html.push('<p>' + mdInline(esc(para.join('\n'))) + '</p>');
+    para = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const codeOnly = line.match(/^\u0000C(\d+)\u0000\s*$/);
+    if (codeOnly) {
+      flush();
+      html.push(`<pre><code>${esc(mdCodeBlocks[Number(codeOnly[1])] || '')}</code></pre>`);
+      continue;
+    }
+
+    if (!line.trim()) { flush(); continue; }
+
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { flush(); const lv = h[1].length; html.push(`<h${lv}>${mdInline(esc(h[2]))}</h${lv}>`); continue; }
+
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { flush(); html.push('<hr />'); continue; }
+
+    if (/^\s*>\s?/.test(line)) {
+      flush();
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+      i--;
+      html.push('<blockquote>' + mdInline(esc(buf.join('\n'))) + '</blockquote>');
+      continue;
+    }
+
+    if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]*-[\s:|-]*\|?[\s:|-]*$/.test(lines[i + 1])) {
+      flush();
+      const rows = [];
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) { rows.push(lines[i]); i++; }
+      i--;
+      if (rows.length >= 2) { html.push(mdRenderTable(rows)); continue; }
+    }
+
+    if (mdListItem(line)) {
+      flush();
+      const list = mdRenderList(lines, i);
+      html.push(list.html);
+      i = list.next - 1;
+      continue;
+    }
+
+    para.push(line);
+  }
+  flush();
+  return html.join('\n');
+}
+
 function toKey(d) {
   const x = new Date(d);
   return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
@@ -46,6 +197,146 @@ function fmtDate(key) {
   const dt = new Date(y, m - 1, d);
   return dt.toLocaleDateString('es', { weekday: 'short', day: 'numeric', month: 'short' });
 }
+
+/* ------------------------------------------------------------
+   Eventos recurrentes
+   ------------------------------------------------------------ */
+const REPEAT_LABELS = { none: 'No se repite', weekly: 'Semanal', monthly: 'Mensual' };
+
+function repeatLabel(rep) { return REPEAT_LABELS[rep] || ''; }
+
+function keyToDate(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function eventHasRepeat(e) {
+  return e && (e.repeat === 'weekly' || e.repeat === 'monthly');
+}
+
+function eventOccursOn(e, key) {
+  if (!e || !e.date) return false;
+  if (!eventHasRepeat(e)) return e.date === key;
+  if (key < e.date) return false;
+  if (e.repeatUntil && key > e.repeatUntil) return false;
+  if (e.repeat === 'weekly') return keyToDate(e.date).getDay() === keyToDate(key).getDay();
+  if (e.repeat === 'monthly') return keyToDate(e.date).getDate() === keyToDate(key).getDate();
+  return false;
+}
+
+function nextOccurrence(e, fromKey) {
+  if (!e || !e.date) return null;
+  if (!eventHasRepeat(e)) return e.date >= fromKey ? e.date : null;
+  let d = keyToDate(e.date >= fromKey ? e.date : fromKey);
+  for (let i = 0; i < 750; i++) {
+    const key = toKey(d);
+    if (e.repeatUntil && key > e.repeatUntil) return null;
+    if (eventOccursOn(e, key)) return key;
+    d.setDate(d.getDate() + 1);
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------
+   Calendario litúrgico (Occidente / rito romano)
+   ------------------------------------------------------------ */
+const LIT_FIXED = {
+  '01-01': 'María Santísima, Madre de Dios',
+  '01-06': 'Epifanía del Señor',
+  '02-02': 'Presentación del Señor',
+  '03-19': 'San José, esposo de la Virgen',
+  '03-25': 'Anunciación del Señor',
+  '06-24': 'Natividad de San Juan Bautista',
+  '06-29': 'San Pedro y San Pablo',
+  '08-06': 'Transfiguración del Señor',
+  '08-15': 'Asunción de la Virgen',
+  '09-08': 'Natividad de la Virgen',
+  '10-07': 'Nuestra Señora del Rosario',
+  '11-01': 'Todos los Santos',
+  '11-02': 'Conmemoración de los Fieles Difuntos',
+  '12-08': 'Inmaculada Concepción',
+  '12-12': 'Nuestra Señora de Guadalupe',
+  '12-25': 'Navidad del Señor'
+};
+
+const LIT_COLORS = {
+  Adviento: '#6b4fa8', Navidad: '#c9a227', 'Tiempo Ordinario': '#2fae6b',
+  Cuaresma: '#6b4fa8', Pascua: '#c9a227', Triduo: '#b23a3a'
+};
+
+function addDays(date, n) { const x = new Date(date); x.setDate(x.getDate() + n); return x; }
+
+function computeEaster(year) {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function firstAdvent(year) {
+  let d = new Date(year, 11, 25);
+  while (d.getDay() !== 0) d.setDate(d.getDate() - 1);
+  return addDays(d, -21);
+}
+
+function baptismOfLord(year) {
+  let off = (7 - new Date(year, 0, 6).getDay()) % 7;
+  if (off === 0) off = 7;
+  return addDays(new Date(year, 0, 6), off);
+}
+
+function liturgicalInfo(dateKey) {
+  const date = keyToDate(dateKey);
+  const year = date.getFullYear();
+  const easter = computeEaster(year);
+  const ash = addDays(easter, -46);
+  const pentecost = addDays(easter, 49);
+  const advent1 = firstAdvent(year);
+  const baptism = baptismOfLord(year);
+  const mmdd = dateKey.slice(5);
+
+  const movable = {};
+  movable[addDays(easter, -7).getTime()] = 'Domingo de Ramos';
+  movable[addDays(easter, -3).getTime()] = 'Jueves Santo';
+  movable[addDays(easter, -2).getTime()] = 'Viernes Santo';
+  movable[easter.getTime()] = 'Domingo de Pascua';
+  movable[addDays(easter, 39).getTime()] = 'Ascensión del Señor';
+  movable[addDays(easter, 49).getTime()] = 'Pentecostés';
+  movable[addDays(easter, 56).getTime()] = 'Santísima Trinidad';
+  movable[addDays(easter, 60).getTime()] = 'Corpus Christi';
+
+  let feast = LIT_FIXED[mmdd] || movable[date.getTime()] || '';
+
+  let season;
+  if (date >= advent1 && date < new Date(year, 11, 25)) season = 'Adviento';
+  else if (date >= new Date(year, 11, 25) || date < baptism) season = 'Navidad';
+  else if (date < ash) season = 'Tiempo Ordinario';
+  else if (date < addDays(easter, -1)) season = 'Cuaresma';
+  else if (date <= pentecost) season = 'Pascua';
+  else season = 'Tiempo Ordinario';
+
+  if (date >= addDays(easter, -3) && date < easter) season = 'Triduo';
+  if (!feast && date.getDay() === 0) feast = 'Domingo';
+
+  return { season, color: LIT_COLORS[season] || '#888', feast };
+}
+
+function nextCelebration(fromKey) {
+  const start = keyToDate(fromKey);
+  for (let i = 0; i < 400; i++) {
+    const d = addDays(start, i);
+    const info = liturgicalInfo(toKey(d));
+    if (info.feast && info.feast !== 'Domingo') return { date: toKey(d), feast: info.feast };
+  }
+  return null;
+}
+
 
 function toast(msg) {
   const t = $('#toast');
@@ -111,8 +402,9 @@ function renderDashboard() {
 
   const today = toKey(new Date());
   const upcoming = state.events
-    .filter((e) => e.date >= today)
-    .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+    .map((e) => ({ e, date: nextOccurrence(e, today) }))
+    .filter((x) => x.date)
+    .sort((a, b) => (a.date + (a.e.time || '')).localeCompare(b.date + (b.e.time || '')));
   const pending = state.tasks.filter((t) => !t.done);
 
   $('#stats').innerHTML = `
@@ -121,13 +413,13 @@ function renderDashboard() {
     <div class="stat"><div class="n">${pending.length}</div><div class="l">Tareas pendientes</div></div>
     <div class="stat"><div class="n">${state.persons.length}</div><div class="l">Personas</div></div>`;
 
-  $('#dash-events').innerHTML = upcoming.length ? upcoming.slice(0, 5).map((e) => `
-    <div class="list-item" data-open="event" data-id="${e.id}">
+  $('#dash-events').innerHTML = upcoming.length ? upcoming.slice(0, 5).map((x) => `
+    <div class="list-item" data-open="event" data-id="${x.e.id}">
       <div class="li-main">
-        <div class="li-title">${esc(e.title)}</div>
-        <div class="li-sub">${esc(fmtDate(e.date))}${e.time ? ' · ' + esc(e.time) : ''}${e.location ? ' · ' + esc(e.location) : ''}${attendCount(e) ? ' · ' + attendCount(e) : ''}</div>
+        <div class="li-title">${esc(x.e.title)}</div>
+        <div class="li-sub">${esc(fmtDate(x.date))}${x.e.time ? ' · ' + esc(x.e.time) : ''}${x.e.location ? ' · ' + esc(x.e.location) : ''}${attendCount(x.e) ? ' · ' + attendCount(x.e) : ''}${eventHasRepeat(x.e) ? ' · ↻ ' + esc(repeatLabel(x.e.repeat)) : ''}</div>
       </div>
-      ${e.category ? `<span class="pill">${esc(e.category)}</span>` : ''}
+      ${x.e.category ? `<span class="pill">${esc(x.e.category)}</span>` : ''}
     </div>`).join('') : `<div class="empty">No hay eventos próximos</div>`;
 
   $('#dash-tasks').innerHTML = pending.length ? pending.slice(0, 5).map((t) => `
@@ -169,8 +461,8 @@ function renderReminders() {
   const tomorrow = plusDay(1);
   const overdue = state.tasks.filter((t) => !t.done && t.due && t.due < today);
   const dueSoon = state.tasks.filter((t) => !t.done && t.due && (t.due === today || t.due === tomorrow));
-  const evToday = state.events.filter((e) => e.date === today);
-  const evTomorrow = state.events.filter((e) => e.date === tomorrow);
+  const evToday = state.events.filter((e) => eventOccursOn(e, today));
+  const evTomorrow = state.events.filter((e) => eventOccursOn(e, tomorrow));
   if (!overdue.length && !dueSoon.length && !evToday.length && !evTomorrow.length) { el.classList.add('hidden'); return; }
   let rows = '';
   evToday.forEach((e) => { rows += `<div class="rem-item"><span class="dot"></span><span><strong>Hoy:</strong> ${esc(e.title)}${e.time ? ' · ' + esc(e.time) : ''}${e.location ? ' · ' + esc(e.location) : ''}</span></div>`; });
@@ -179,6 +471,46 @@ function renderReminders() {
   dueSoon.forEach((t) => { rows += `<div class="rem-item"><span class="dot"></span><span>${esc(t.title)} · vence ${esc(fmtDate(t.due))}</span></div>`; });
   el.innerHTML = `<h3>🔔 Recordatorios <button class="rem-close" id="rem-close" title="Ocultar">✕</button></h3>${rows}`;
   el.classList.remove('hidden');
+}
+
+/* ------------------------------------------------------------
+   Avisos del sistema (notificaciones de Windows)
+   ------------------------------------------------------------ */
+function sysNotify(title, body) {
+  if (!state.settings.notify) return;
+  try { api.notify({ title, body }); } catch (e) { /* noop */ }
+}
+
+function checkNotifications() {
+  if (!state.settings.notify) return;
+  const today = toKey(new Date());
+  const now = new Date();
+
+  state.events.forEach((e) => {
+    if (!eventOccursOn(e, today) || !e.time) return;
+    const [hh, mm] = e.time.split(':').map(Number);
+    const dt = new Date();
+    dt.setHours(hh || 0, mm || 0, 0, 0);
+    const diff = (dt - now) / 60000;
+    const k = 'soon:' + e.id + ':' + today;
+    if (diff > 0 && diff <= 60 && !ui.notified[k]) {
+      ui.notified[k] = true;
+      sysNotify('En menos de 1 hora', e.title + (e.location ? ' · ' + e.location : ''));
+    }
+  });
+
+  const dayKey = 'day:' + today;
+  if (ui.notified[dayKey]) return;
+  const overdue = state.tasks.filter((t) => !t.done && t.due && t.due < today);
+  const dueToday = state.tasks.filter((t) => !t.done && t.due === today);
+  const evToday = state.events.filter((e) => eventOccursOn(e, today));
+  if (!overdue.length && !dueToday.length && !evToday.length) return;
+  const parts = [];
+  if (evToday.length) parts.push(evToday.length === 1 ? `Evento: ${evToday[0].title}${evToday[0].time ? ' (' + evToday[0].time + ')' : ''}` : `${evToday.length} eventos hoy`);
+  if (dueToday.length) parts.push(dueToday.length === 1 ? `Tarea: ${dueToday[0].title}` : `${dueToday.length} tareas para hoy`);
+  if (overdue.length) parts.push(`${overdue.length} tarea(s) vencida(s)`);
+  ui.notified[dayKey] = true;
+  sysNotify('Agenda de hoy', parts.join(' · '));
 }
 
 /* ------------------------------------------------------------
@@ -223,9 +555,10 @@ const NOTE_TEMPLATES = {
   }
 };
 
-function openNote(id, templateId) {
+function openNote(id, templateId, prefill) {
   const n = state.notes.find((x) => x.id === id);
-  const tpl = (!n && templateId) ? NOTE_TEMPLATES[templateId] : null;
+  const tpl = (!n && !prefill && templateId) ? NOTE_TEMPLATES[templateId] : null;
+  const start = prefill || (tpl ? { title: tpl.title, body: tpl.body, tags: (tpl.tags || '').split(',').map((s) => s.trim()).filter(Boolean) } : null);
   openModal({
     title: n ? 'Editar nota' : 'Nueva nota',
     fields: [
@@ -234,7 +567,7 @@ function openNote(id, templateId) {
       { key: 'tags', label: 'Etiquetas (separadas por coma)', type: 'text', placeholder: 'oración, retiro, campaña' }
     ],
     values: n ? { ...n, tags: (n.tags || []).join(', ') }
-      : tpl ? { title: tpl.title, body: tpl.body, tags: tpl.tags }
+      : start ? { title: start.title || '', body: start.body || '', tags: Array.isArray(start.tags) ? start.tags.join(', ') : (start.tags || '') }
       : {},
     onSave: async (v) => {
       const tags = (v.tags || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -248,6 +581,57 @@ function openNote(id, templateId) {
       await persist(); render();
     } : null
   });
+}
+
+function pickImageFile() {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = () => resolve((input.files && input.files[0]) || null);
+    input.oncancel = () => resolve(null);
+    input.click();
+  });
+}
+
+function parseNoteJson(text) {
+  let t = String(text || '').trim();
+  t = t.replace(/^```[a-zA-Z]*\s*\n?/, '').replace(/```\s*$/, '').trim();
+  const norm = (o) => ({
+    title: String(o.title || 'Nota desde imagen').trim().slice(0, 120),
+    body: String(o.body || o.content || '').trim(),
+    tags: Array.isArray(o.tags) ? o.tags.map((x) => String(x).trim()).filter(Boolean) : []
+  });
+  try { return norm(JSON.parse(t)); } catch (e) { /* noop */ }
+  const m = t.match(/\{[\s\S]*\}/);
+  if (m) { try { return norm(JSON.parse(m[0])); } catch (e) { /* noop */ } }
+  return { title: 'Nota desde imagen', body: t, tags: [] };
+}
+
+async function noteFromImage() {
+  if (!aiReady()) { toast('Primero activa la IA local'); go('settings'); return; }
+  if (!modelInstalled(currentChatModel())) { toast('El modelo de este modo no está descargado. Instálalo en Ajustes → IA local.'); go('settings'); return; }
+  const file = await pickImageFile();
+  if (!file) return;
+  const btn = $('#notes-image');
+  if (btn) btn.disabled = true;
+  toast('Analizando la imagen…');
+  try {
+    const dataUrl = await prepareImage(file);
+    const system = {
+      role: 'system',
+      content: 'Eres un asistente que digitaliza documentos para una app de pastoral escolar. Observa la imagen y devuelve ÚNICAMENTE un objeto JSON válido, sin comentarios ni bloques de código, con las claves: "title" (título breve y descriptivo), "body" (contenido completo en Markdown, respetando títulos, listas, fechas y nombres), "tags" (array de 1 a 5 etiquetas en minúsculas). No inventes información que no aparezca en la imagen.'
+    };
+    const user = { role: 'user', content: 'Convierte el contenido de esta imagen en una nota.', images: [dataUrl] };
+    const res = await api.aiChat({ url: state.settings.ollamaUrl, model: currentChatModel(), messages: [system, user] });
+    if (!res || !res.ok) { toast('No se pudo analizar la imagen' + (res && res.error ? ': ' + res.error : '')); return; }
+    openNote(null, null, parseNoteJson(res.content));
+    toast('Revisa y guarda la nota');
+  } catch (e) {
+    toast('Error al procesar la imagen');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 /* ------------------------------------------------------------
@@ -268,30 +652,49 @@ function renderCalendar() {
   for (let i = 0; i < 42; i++) {
     const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
     const key = toKey(d);
-    const evs = state.events.filter((e) => e.date === key).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    const evs = state.events.filter((e) => eventOccursOn(e, key)).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    const lit = liturgicalInfo(key);
     const classes = ['cal-day'];
     if (d.getMonth() !== month) classes.push('other');
     if (key === todayKey) classes.push('today');
     if (key === ui.calSelected) classes.push('selected');
-    const evHtml = evs.slice(0, 3).map((e) => `<div class="ev">${e.time ? esc(e.time) + ' ' : ''}${esc(e.title)}</div>`).join('');
+    if (lit.feast) classes.push('feast');
+    const litTitle = lit.feast ? `${lit.feast} · ${lit.season}` : lit.season;
+    const evHtml = evs.slice(0, 3).map((e) => `<div class="ev">${eventHasRepeat(e) ? '↻ ' : ''}${e.time ? esc(e.time) + ' ' : ''}${esc(e.title)}</div>`).join('');
     const more = evs.length > 3 ? `<div class="ev more">+${evs.length - 3} más</div>` : '';
-    html += `<div class="${classes.join(' ')}" data-day="${key}"><div class="d">${d.getDate()}</div>${evHtml}${more}</div>`;
+    html += `<div class="${classes.join(' ')}" data-day="${key}" style="--lit-color:${lit.color}" title="${esc(litTitle)}"><div class="d">${d.getDate()}</div>${evHtml}${more}</div>`;
   }
   $('#calendar').innerHTML = html;
+  renderLitBanner();
+}
+
+function renderLitBanner() {
+  const el = $('#lit-banner');
+  if (!el) return;
+  const today = toKey(new Date());
+  const info = liturgicalInfo(today);
+  const next = nextCelebration(addDays(keyToDate(today), 1));
+  let html = `<span class="lit-dot" style="background:${info.color}"></span>`;
+  html += `<span class="lit-season">${esc(info.season)}</span>`;
+  if (info.feast && info.feast !== 'Domingo') html += `<span>· ${esc(info.feast)}</span>`;
+  if (next) html += `<span class="lit-next">Próxima celebración: <b>${esc(next.feast)}</b> (${esc(fmtDate(next.date))})</span>`;
+  el.innerHTML = html;
+  el.classList.remove('hidden');
 }
 
 function renderEventsDay() {
   const key = ui.calSelected;
-  $('#events-day-title').textContent = 'Eventos · ' + fmtDate(key);
+  const lit = liturgicalInfo(key);
+  $('#events-day-title').textContent = 'Eventos · ' + fmtDate(key) + ' — ' + lit.season + (lit.feast && lit.feast !== 'Domingo' ? ' · ' + lit.feast : '');
   const q = ($('#events-search').value || '').toLowerCase();
-  let list = state.events.filter((e) => e.date === key).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+  let list = state.events.filter((e) => eventOccursOn(e, key)).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
   if (q) list = list.filter((e) => (e.title + ' ' + (e.description || '')).toLowerCase().includes(q));
   $('#events-day').innerHTML = list.length ? list.map((e) => `
     <div class="list-item" data-open="event" data-id="${e.id}">
       <span class="pill date">${e.time ? esc(e.time) : 'Todo el día'}</span>
       <div class="li-main">
         <div class="li-title">${esc(e.title)}</div>
-        <div class="li-sub">${esc(e.location || e.description || '')}${attendCount(e) ? (e.location || e.description ? ' · ' : '') + attendCount(e) : ''}</div>
+        <div class="li-sub">${esc(e.location || e.description || '')}${attendCount(e) ? (e.location || e.description ? ' · ' : '') + attendCount(e) : ''}${eventHasRepeat(e) ? ' · ↻ ' + esc(repeatLabel(e.repeat)) : ''}</div>
       </div>
       ${e.category ? `<span class="pill">${esc(e.category)}</span>` : ''}
     </div>`).join('') : `<div class="empty">No hay eventos este día. Haz clic en "+ Nuevo evento" o en un día del calendario.</div>`;
@@ -307,10 +710,17 @@ function openEvent(id, defaultDate) {
       { key: 'time', label: 'Hora', type: 'time' },
       { key: 'location', label: 'Lugar', type: 'text', placeholder: 'Ej: Capilla' },
       { key: 'category', label: 'Categoría', type: 'select', options: ['', 'Misa', 'Retiro', 'Reunión', 'Campaña', 'Formación', 'Convivencia', 'Otro'] },
+      { key: 'repeat', label: 'Repetición', type: 'select', options: [
+        { value: 'none', label: 'No se repite' },
+        { value: 'weekly', label: 'Cada semana' },
+        { value: 'monthly', label: 'Cada mes' }
+      ] },
+      { key: 'repeatUntil', label: 'Repetir hasta (opcional)', type: 'date' },
       { key: 'description', label: 'Descripción', type: 'textarea', placeholder: 'Detalles del evento...' },
       { key: 'attendance', label: 'Asistencia', type: 'people' }
     ],
-    values: e ? { ...e, attendance: e.attendance || [] } : { date: defaultDate || ui.calSelected, attendance: [] },
+    values: e ? { ...e, repeat: e.repeat || 'none', attendance: e.attendance || [] }
+      : { date: defaultDate || ui.calSelected, repeat: 'none', attendance: [] },
     onSave: async (v) => {
       if (e) Object.assign(e, v);
       else state.events.push({ id: uid(), ...v });
@@ -466,6 +876,8 @@ const AI_TOOLS = [
           time: { type: 'string', description: 'Hora en formato HH:MM (opcional)' },
           location: { type: 'string', description: 'Lugar del evento' },
           category: { type: 'string', description: 'Categoría (Misa, Retiro, Reunión, Campaña, Formación, Convivencia, Otro)' },
+          repeat: { type: 'string', enum: ['none', 'weekly', 'monthly'], description: 'Repetición del evento (por defecto none)' },
+          repeatUntil: { type: 'string', description: 'Fecha final de la repetición YYYY-MM-DD (opcional)' },
           description: { type: 'string', description: 'Descripción o detalles del evento' }
         },
         required: ['title', 'date']
@@ -528,18 +940,27 @@ function aiReady() {
   return aiMgr.running && (aiMgr.models || []).length > 0;
 }
 
+function currentChatModel() {
+  return CHAT_MODELS[state.settings.chatMode === 'deep' ? 'deep' : 'daily'].model;
+}
+
+function modelInstalled(name) {
+  return (aiMgr.models || []).includes(name);
+}
+
+async function callModel(messages, requestId) {
+  return await api.aiChat({ url: state.settings.ollamaUrl, model: currentChatModel(), messages, tools: AI_TOOLS, requestId });
+}
+
 async function refreshAiManager() {
   try { aiMgr = await api.aiManagerStatus(); } catch (e) { /* noop */ }
-  updateChatModelSelect();
+  updateChatModeUi();
   updateAiUi();
 }
 
-function updateChatModelSelect() {
-  const models = aiMgr.models || [];
-  const sel = $('#chat-model');
-  if (!models.length) { sel.innerHTML = `<option value="">Sin modelo</option>`; return; }
-  if (!models.includes(state.settings.model)) state.settings.model = models[0];
-  sel.innerHTML = models.map((m) => `<option value="${esc(m)}"${m === state.settings.model ? ' selected' : ''}>${esc(m)}</option>`).join('');
+function updateChatModeUi() {
+  const sel = $('#chat-mode');
+  if (sel) sel.value = state.settings.chatMode === 'deep' ? 'deep' : 'daily';
 }
 
 function updateAiUi() {
@@ -552,11 +973,15 @@ function updateAiUi() {
   const running = aiMgr.running;
   const hasModel = (aiMgr.models || []).length > 0;
   const ready = running && hasModel;
+  const selectedReady = ready && modelInstalled(currentChatModel());
 
   chat.classList.toggle('hidden', !ready);
   setup.classList.toggle('hidden', ready);
+  const modeSel = $('#chat-mode');
+  if (modeSel) modeSel.classList.toggle('hidden', !ready);
 
-  if (ready) { chip.className = 'pill ok'; chip.textContent = '● IA lista'; }
+  if (selectedReady) { chip.className = 'pill ok'; chip.textContent = '● IA lista'; }
+  else if (ready) { chip.className = 'pill warn'; chip.textContent = '● Falta el modelo elegido'; }
   else if (running) { chip.className = 'pill warn'; chip.textContent = '● Falta el modelo'; }
   else if (installed) { chip.className = 'pill warn'; chip.textContent = '● IA detenida'; }
   else { chip.className = 'pill red'; chip.textContent = '● IA no instalada'; }
@@ -615,23 +1040,139 @@ async function pullModel() {
   const model = $('#model-choice').value;
   if (!model) return;
   $('#btn-pull').disabled = true;
-  state.settings.model = model;
   $('#ai-progress-text').textContent = 'Iniciando descarga del modelo...';
   const res = await api.aiPull(model);
   if (!res.ok) { toast('Error: ' + res.error); $('#btn-pull').disabled = false; return; }
-  await persist();
   await refreshAiManager();
   await checkAi();
   toast('Modelo listo');
 }
 
+function thinkingHTML() {
+  const t = ui.chatThinking;
+  if (!t) return '';
+  const secs = Math.floor((Date.now() - t.startedAt) / 1000);
+  const label = t.stage === 'connecting' ? 'Conectando con el servicio'
+    : t.stage === 'tools' ? 'Preparando acciones'
+    : t.stage === 'writing' ? 'Redactando la respuesta'
+    : t.stage === 'stopping' ? 'Deteniendo'
+    : 'Pensando';
+  const time = secs >= 3 ? ` <span class="thinking-time">${secs} s</span>` : '';
+  const hint = secs >= 15
+    ? '<span class="thinking-hint">Sigue trabajando: puede tardar hasta un minuto. Si quieres, pulsa «Detener».</span>'
+    : '';
+  return `<div class="thinking-row"><span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span><span class="thinking-label">${label}…${time}</span></div>${hint}`;
+}
+
+function streamInnerHTML() {
+  const text = ui.streamText || '';
+  if (!text) return thinkingHTML();
+  let inner = renderMarkdown(text);
+  if (inner.endsWith('</p>')) inner = inner.slice(0, -4) + '<span class="stream-cursor"></span></p>';
+  else inner += '<span class="stream-cursor"></span>';
+  return `<div class="md stream-md">${inner}</div>`;
+}
+
+function renderStreamBubble() {
+  const el = document.getElementById('chat-streaming');
+  if (!el) { renderChat(); return; }
+  el.className = 'msg assistant ' + (ui.streamText ? 'streaming' : 'thinking');
+  el.innerHTML = streamInnerHTML();
+  const log = $('#chat-log');
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+function scheduleStreamRender() {
+  if (ui.streamRaf) return;
+  ui.streamRaf = requestAnimationFrame(() => { ui.streamRaf = null; renderStreamBubble(); });
+}
+
+function handleAiStream(d) {
+  if (!ui.chatBusy || !d || d.requestId !== ui.chatRequestId) return;
+  if (d.delta) {
+    ui.streamText = (ui.streamText || '') + d.delta;
+    scheduleStreamRender();
+  }
+}
+
+function startThinking() {
+  ui.chatCanceled = false;
+  ui.streamText = '';
+  ui.chatThinking = { stage: 'connecting', startedAt: Date.now() };
+  if (ui.chatTimer) clearInterval(ui.chatTimer);
+  ui.chatTimer = setInterval(renderStreamBubble, 1000);
+  renderChat();
+}
+
+function setThinkingStage(stage) {
+  if (!ui.chatThinking) ui.chatThinking = { startedAt: Date.now() };
+  ui.chatThinking.stage = stage;
+  renderStreamBubble();
+}
+
+function stopThinking() {
+  ui.chatThinking = null;
+  ui.streamText = '';
+  if (ui.chatTimer) { clearInterval(ui.chatTimer); ui.chatTimer = null; }
+}
+
+function setChatBusy(busy) {
+  const send = $('#chat-send');
+  const stop = $('#chat-stop');
+  const attach = $('#chat-attach');
+  if (send) { send.disabled = busy; send.textContent = busy ? 'Enviando…' : 'Enviar'; }
+  if (stop) stop.classList.toggle('hidden', !busy);
+  if (attach) attach.disabled = busy;
+}
+
 function renderChat() {
-  $('#chat-log').innerHTML = state.chat.length
-    ? state.chat.map((m) => `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}">${esc(m.content)}</div>`).join('')
-    : `<div class="empty">Conversa con tu asistente local. Prueba una sugerencia debajo.</div>`;
-  $('#chat-suggest').classList.toggle('hidden', state.chat.length > 0);
+  const empty = 'Conversa con tu asistente local. Prueba una sugerencia debajo.';
+  let lastAssistant = -1;
+  for (let i = state.chat.length - 1; i >= 0; i--) { if (state.chat[i].role === 'assistant') { lastAssistant = i; break; } }
+  const busy = ui.chatBusy || !!ui.chatThinking || !!ui.streamText;
+  const bubbles = state.chat.map((m, i) => {
+    if (m.role === 'user') {
+      const imgs = (m.images || []).map((src) => `<img class="msg-img" src="${esc(src)}" alt="Imagen adjunta" />`).join('');
+      const imgWrap = imgs ? `<div class="msg-imgs">${imgs}</div>` : '';
+      const txt = m.content ? `<div class="msg-text">${esc(m.content)}</div>` : '';
+      return `<div class="msg user">${imgWrap}${txt}</div>`;
+    }
+    const actions = `<div class="msg-actions">
+        <button class="msg-action" type="button" data-copy="${i}" title="Copiar respuesta">📋 Copiar</button>
+        ${i === lastAssistant && !busy ? `<button class="msg-action" type="button" data-regen="${i}" title="Generar otra respuesta">↻ Rehacer</button>` : ''}
+      </div>`;
+    return `<div class="msg assistant"><div class="md">${renderMarkdown(m.content)}</div>${actions}</div>`;
+  });
+  if (ui.chatThinking || ui.streamText) {
+    bubbles.push(`<div id="chat-streaming" class="msg assistant ${ui.streamText ? 'streaming' : 'thinking'}">${streamInnerHTML()}</div>`);
+  }
+  $('#chat-log').innerHTML = bubbles.length ? bubbles.join('') : `<div class="empty">${esc(empty)}</div>`;
+  $('#chat-suggest').classList.toggle('hidden', state.chat.length > 0 || !!ui.chatThinking || !!ui.streamText);
+  renderAttachments();
   const log = $('#chat-log');
   log.scrollTop = log.scrollHeight;
+}
+
+async function copyText(text) {
+  const value = String(text == null ? '' : text);
+  try {
+    await navigator.clipboard.writeText(value);
+    toast('Copiado al portapapeles');
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      toast('Copiado al portapapeles');
+    } catch (e2) {
+      toast('No se pudo copiar');
+    }
+  }
 }
 
 const TOOL_RUNNERS = {
@@ -649,7 +1190,9 @@ const TOOL_RUNNERS = {
     const ev = {
       id: uid(), title: String(a.title).trim(), date: String(a.date).trim(),
       time: (a.time || '').trim(), location: (a.location || '').trim(),
-      category: (a.category || '').trim(), description: (a.description || '').trim(), attendance: []
+      category: (a.category || '').trim(), description: (a.description || '').trim(),
+      repeat: ['weekly', 'monthly'].includes(a.repeat) ? a.repeat : 'none',
+      repeatUntil: (a.repeatUntil || '').trim(), attendance: []
     };
     state.events.push(ev);
     return { kind: 'evento', label: ev.title, id: ev.id };
@@ -703,7 +1246,9 @@ async function runToolCalls(toolCalls) {
         result = { ok: false, error: String(err.message || err) };
       }
     }
-    messages.push({ role: 'tool', tool_name: name, content: JSON.stringify(result) });
+    const toolMsg = { role: 'tool', tool_name: name, content: JSON.stringify(result) };
+    if (call.id) toolMsg.tool_call_id = call.id;
+    messages.push(toolMsg);
   }
   if (done.length) await persist();
   return { messages, done };
@@ -713,10 +1258,14 @@ function buildContextSummary() {
   const today = toKey(new Date());
   const parts = [];
   parts.push(`Hoy es ${today}.`);
+  const lit = liturgicalInfo(today);
+  parts.push(`Tiempo litúrgico: ${lit.season}${lit.feast && lit.feast !== 'Domingo' ? ' (' + lit.feast + ')' : ''}.`);
   parts.push(`Total: ${state.notes.length} notas, ${state.events.length} eventos, ${state.tasks.filter((t) => !t.done).length} tareas pendientes, ${state.groups.length} grupos, ${state.persons.length} personas.`);
-  const upcoming = state.events.filter((e) => e.date >= today)
-    .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || ''))).slice(0, 8);
-  if (upcoming.length) parts.push('Próximos eventos: ' + upcoming.map((e) => `${e.title} (${e.date}${e.time ? ' ' + e.time : ''})`).join('; ') + '.');
+  const upcoming = state.events
+    .map((e) => ({ e, date: nextOccurrence(e, today) }))
+    .filter((x) => x.date)
+    .sort((a, b) => (a.date + (a.e.time || '')).localeCompare(b.date + (b.e.time || ''))).slice(0, 8);
+  if (upcoming.length) parts.push('Próximos eventos: ' + upcoming.map((x) => `${x.e.title} (${x.date}${x.e.time ? ' ' + x.e.time : ''})`).join('; ') + '.');
   const pending = state.tasks.filter((t) => !t.done)
     .sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999')).slice(0, 8);
   if (pending.length) parts.push('Tareas pendientes: ' + pending.map((t) => `${t.title}${t.due ? ' (' + t.due + ')' : ''}`).join('; ') + '.');
@@ -727,44 +1276,125 @@ function buildContextSummary() {
   return parts.join('\n');
 }
 
-async function sendChat(text) {
-  if (ui.chatBusy || !text.trim()) return;
-  ui.chatBusy = true;
-  state.chat.push({ role: 'user', content: text.trim() });
-  renderChat();
-  const log = $('#chat-log');
-  const thinking = document.createElement('div');
-  thinking.className = 'msg assistant thinking';
-  thinking.textContent = 'Pensando...';
-  log.appendChild(thinking);
-  log.scrollTop = log.scrollHeight;
+/* ------------------------------------------------------------
+   Adjuntos de imagen (visión)
+   ------------------------------------------------------------ */
+const MAX_ATTACH = 4;
+const MAX_SIDE = 1536;
 
-  await persist();
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error('No se pudo leer la imagen'));
+    r.readAsDataURL(file);
+  });
+}
 
-  const system = {
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Imagen no válida'));
+    img.src = src;
+  });
+}
+
+async function prepareImage(file) {
+  const raw = await readFileAsDataURL(file);
+  try {
+    const img = await loadImage(raw);
+    const w0 = img.naturalWidth || img.width;
+    const h0 = img.naturalHeight || img.height;
+    const scale = Math.min(1, MAX_SIDE / Math.max(w0, h0));
+    if (scale >= 1 && raw.length < 700000) return raw;
+    const w = Math.max(1, Math.round(w0 * scale));
+    const h = Math.max(1, Math.round(h0 * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } catch (e) {
+    return raw;
+  }
+}
+
+async function addAttachment(file) {
+  if (!file || !/^image\//.test(file.type || '')) return;
+  if (ui.attached.length >= MAX_ATTACH) { toast('Máximo ' + MAX_ATTACH + ' imágenes por mensaje'); return; }
+  try {
+    const url = await prepareImage(file);
+    ui.attached.push(url);
+    renderAttachments();
+  } catch (e) {
+    toast('No se pudo añadir la imagen');
+  }
+}
+
+function renderAttachments() {
+  const box = $('#chat-attach-preview');
+  if (!box) return;
+  if (!ui.attached.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  box.classList.remove('hidden');
+  box.innerHTML = ui.attached.map((src, i) => `
+    <div class="attach-thumb">
+      <img src="${esc(src)}" alt="Adjunto ${i + 1}" />
+      <button class="attach-remove" type="button" data-attach-remove="${i}" title="Quitar">✕</button>
+    </div>`).join('');
+}
+
+function clearAttachments() {
+  ui.attached = [];
+  renderAttachments();
+}
+
+function buildSystemPrompt() {
+  return {
     role: 'system',
     content: `Eres el asistente de la pastoral de un colegio${state.settings.schoolName ? ' (' + state.settings.schoolName + ')' : ''}${state.settings.pastorName ? ', responsable ' + state.settings.pastorName : ''}. ` +
       `Ayudas a organizar ideas, eventos, retiros, campañas, tareas, grupos y personas. Responde en español, de forma práctica, cálida y concisa. ` +
-      `Usa lenguaje respetuoso y valores cristianos.\n` +
+      `Escribe tus respuestas en formato Markdown (negritas, listas, títulos con #, tablas cuando aporten claridad): la app lo mostrará con estilo. ` +
+      `El usuario puede adjuntar imágenes: si recibes una, descríbela e interprétala con atención (textos, listas, fechas, personas, horarios) y úsala para ayudarle. ` +
+      `Eres católico, con sensibilidad hacia la espiritualidad dominicana. Usa lenguaje respetuoso, teológicamente correcto y acorde a los valores del Evangelio.\n` +
       `Puedes CREAR elementos (notas, eventos, tareas, grupos y personas) con las herramientas disponibles. ` +
       `Cuando el usuario pida añadir, crear o registrar algo, llama a la herramienta correspondiente. Si falta un dato imprescindible (por ejemplo la fecha de un evento), pídelo antes de crearlo. ` +
       `No inventes datos. Cuando ya tengas la información suficiente, actúa directamente.\n` +
+      `REGLA ABSOLUTA PARA ORACIONES: Si el usuario te pide escribir una oración, oración cristiana, rezar, bendición, reflexión, acto penitencial, invocación, plegaria, jaculatoria, palabra de acogida, ofrenda, acción de gracias, consagración o cualquier texto para un momento de oración, DEBES generar el texto completo de la oración. ` +
+      `Nunca respondas "¿Te gustaría que te escriba una oración...?" o preguntes datos adicionales si el usuario ya dio información sobre para qué la necesita. ` +
+      `Escribe oraciones completas, bien estructuradas y listas para rezar en comunidad. ` +
+      `Incluye elementos apropiados: invocación (Gloria al Padre...), cuerpo con peticiones, posible respuesta (R/.), conclusión (Por nuestro Señor Jesucristo...) y firma o nombre según corresponda. ` +
+      `Para celebraciones dominicanas, recuerda la espiritualidad de Santo Domingo de Guzmán: predicación, estudio, oración, comunidad y la búsqueda de la Verdad (Veritas). Usa términos propios de la vida dominicana cuando sea oportuno. ` +
+      `Ten en cuenta el tiempo litúrgico (Adviento, Navidad, Cuaresma, Semana Santa, Pascua, Pentecostés, Tiempo Ordinario) cuando sea relevante.\n` +
       `Contexto actual de la app:\n${buildContextSummary()}`
   };
+}
 
-  const messages = [system, ...state.chat.slice(-12)];
+async function runAssistantTurn() {
+  ui.chatBusy = true;
+  ui.chatRequestId = uid();
+  startThinking();
+  setChatBusy(true);
+
+  await persist();
+
+  const messages = [buildSystemPrompt(), ...state.chat.slice(-12)];
   const actions = [];
   let finalContent = '';
 
   try {
     for (let step = 0; step < 6; step++) {
-      const res = await api.aiChat({ url: state.settings.ollamaUrl, model: state.settings.model, messages, tools: AI_TOOLS });
+      ui.streamText = '';
+      if (step > 0) setThinkingStage('thinking');
+      const res = await callModel(messages, ui.chatRequestId);
+      if (res.canceled) { ui.chatCanceled = true; break; }
       if (!res.ok) {
-        finalContent = `⚠ No se pudo conectar con la IA local.\n\n${res.error}\n\nRevisa que el motor esté en marcha (Ajustes / IA).`;
+        finalContent = `⚠ No se pudo conectar con la IA local.\n\n${res.error}\n\nRevisa que el motor esté en marcha (Ajustes / IA local).`;
         break;
       }
       const calls = res.tool_calls || [];
-      if (!calls.length) { finalContent = (res.content || '').trim(); break; }
+      if (!calls.length) { finalContent = ((res.content || ui.streamText) || '').trim(); break; }
+      setThinkingStage('tools');
       messages.push({ role: 'assistant', content: res.content || '', tool_calls: calls });
       const handled = await runToolCalls(calls);
       messages.push(...handled.messages);
@@ -772,7 +1402,8 @@ async function sendChat(text) {
       if (handled.done.length) toast('Creado: ' + handled.done.map((d) => `${d.kind} «${d.label}»`).join(', '));
       if (step === 5) finalContent = 'He terminado las acciones solicitadas.';
     }
-    if (finalContent) state.chat.push({ role: 'assistant', content: finalContent });
+    if (ui.chatCanceled) { toast('Respuesta detenida'); }
+    else if (finalContent) state.chat.push({ role: 'assistant', content: finalContent });
     else if (actions.length) state.chat.push({ role: 'assistant', content: 'Hecho. ' + actions.map((d) => `Creé la ${d.kind} «${d.label}»`).join(', ') + '.' });
     await persist();
   } catch (err) {
@@ -780,11 +1411,52 @@ async function sendChat(text) {
     await persist();
     toast('Error al enviar mensaje');
   } finally {
-    try { thinking.remove(); } catch (e) { /* noop */ }
+    ui.chatRequestId = null;
+    stopThinking();
+    setChatBusy(false);
     ui.chatBusy = false;
     renderChat();
     render();
   }
+}
+
+async function sendChat(text) {
+  const hasImages = ui.attached.length > 0;
+  if (ui.chatBusy || (!text.trim() && !hasImages)) return;
+  if (!aiReady()) {
+    toast('Primero activa la IA local');
+    go('settings');
+    return;
+  }
+  if (!modelInstalled(currentChatModel())) {
+    toast('El modelo de este modo no está descargado. Instálalo en Ajustes → IA local.');
+    go('settings');
+    return;
+  }
+  const userMsg = { role: 'user', content: text.trim() };
+  if (hasImages) userMsg.images = ui.attached.slice();
+  state.chat.push(userMsg);
+  clearAttachments();
+  await runAssistantTurn();
+}
+
+async function regenerate() {
+  if (ui.chatBusy) return;
+  if (!aiReady()) {
+    toast('Primero activa la IA local');
+    go('settings');
+    return;
+  }
+  if (!modelInstalled(currentChatModel())) {
+    toast('El modelo de este modo no está descargado. Instálalo en Ajustes → IA local.');
+    go('settings');
+    return;
+  }
+  let idx = -1;
+  for (let i = state.chat.length - 1; i >= 0; i--) { if (state.chat[i].role === 'assistant') { idx = i; break; } }
+  if (idx === -1) { toast('No hay respuesta que rehacer'); return; }
+  state.chat.splice(idx);
+  await runAssistantTurn();
 }
 
 function weeklySummary() {
@@ -800,6 +1472,10 @@ async function renderSettings() {
   $('#set-pastor').value = state.settings.pastorName || '';
   $('#set-school').value = state.settings.schoolName || '';
   $('#set-theme').value = state.settings.theme || 'light';
+  const notifyEl = $('#set-notify');
+  if (notifyEl) notifyEl.checked = state.settings.notify !== false;
+  const welcomeEl = $('#set-welcome');
+  if (welcomeEl) welcomeEl.checked = state.settings.showWelcome !== false;
   try { $('#set-datapath').textContent = await api.dataPath(); } catch (e) { /* noop */ }
   try { $('#set-version').textContent = 'Versión ' + await api.appVersion(); } catch (e) { /* noop */ }
   await refreshAiManager();
@@ -811,6 +1487,7 @@ async function renderSettings() {
   $('#set-ai-dir').textContent = 'Carpeta de IA: ' + (aiMgr.dataDir || '');
   renderBackups();
 }
+
 
 function fmtBackupName(name) {
   const m = String(name).match(/pastoral-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/);
@@ -860,10 +1537,6 @@ async function checkAi() {
   if (st.online) {
     badge.className = 'ai-badge online';
     badge.textContent = '● IA conectada';
-    if (!st.models.includes(state.settings.model) && st.models.length) {
-      state.settings.model = st.models[0];
-      await persist();
-    }
     return st;
   }
   badge.className = 'ai-badge offline';
@@ -888,7 +1561,11 @@ function openModal(cfg) {
     }
     if (f.type === 'select') {
       return `<label class="field"><span>${esc(f.label)}</span><select name="${f.key}">` +
-        f.options.map((o) => `<option value="${esc(o)}"${String(val) === String(o) ? ' selected' : ''}>${esc(o || '—')}</option>`).join('') +
+        f.options.map((o) => {
+          const ov = (o && typeof o === 'object') ? o.value : o;
+          const ol = (o && typeof o === 'object') ? (o.label || '—') : (o || '—');
+          return `<option value="${esc(ov)}"${String(val) === String(ov) ? ' selected' : ''}>${esc(ol)}</option>`;
+        }).join('') +
         `</select></label>`;
     }
     if (f.type === 'people') {
@@ -1055,6 +1732,11 @@ function exportIcs() {
     if (e.location) lines.push('LOCATION:' + icsEsc(e.location));
     if (e.description) lines.push('DESCRIPTION:' + icsEsc(e.description));
     if (e.category) lines.push('CATEGORIES:' + icsEsc(e.category));
+    if (eventHasRepeat(e)) {
+      let rule = 'FREQ=' + (e.repeat === 'weekly' ? 'WEEKLY' : 'MONTHLY');
+      if (e.repeatUntil) rule += ';UNTIL=' + e.repeatUntil.replace(/-/g, '') + 'T235959Z';
+      lines.push('RRULE:' + rule);
+    }
     lines.push('END:VEVENT');
   });
   lines.push('END:VCALENDAR');
@@ -1069,12 +1751,162 @@ function printAgenda() {
   let html = `<h1>${esc(school)} — Agenda pastoral</h1>`;
   html += `<p>${esc(new Date().toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' }))}</p>`;
   html += '<h2>Eventos</h2>';
-  html += evs.length ? evs.map((e) => `<div class="pr-item"><span class="pr-date">${esc(fmtDate(e.date))}${e.time ? ' · ' + esc(e.time) : ''}</span> — ${esc(e.title)}${e.location ? ' · ' + esc(e.location) : ''}${e.category ? ' · ' + esc(e.category) : ''}</div>`).join('') : '<p>No hay eventos.</p>';
+  html += evs.length ? evs.map((e) => `<div class="pr-item"><span class="pr-date">${esc(fmtDate(e.date))}${e.time ? ' · ' + esc(e.time) : ''}</span> — ${esc(e.title)}${e.location ? ' · ' + esc(e.location) : ''}${e.category ? ' · ' + esc(e.category) : ''}${eventHasRepeat(e) ? ' · ↻ ' + esc(repeatLabel(e.repeat)) : ''}</div>`).join('') : '<p>No hay eventos.</p>';
   const pending = state.tasks.filter((t) => !t.done);
   html += '<h2>Tareas pendientes</h2>';
   html += pending.length ? pending.map((t) => `<div class="pr-item">${esc(t.title)}${t.due ? ' · ' + esc(fmtDate(t.due)) : ''} ${t.priority ? '(' + esc(prioLabel(t.priority)) + ')' : ''}</div>`).join('') : '<p>Sin tareas pendientes.</p>';
   area.innerHTML = html;
   window.print();
+}
+
+/* ------------------------------------------------------------
+   Exportar notas y comunidad (PDF / CSV)
+   ------------------------------------------------------------ */
+function csvEscape(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\n\r;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function toCsv(rows) {
+  return '\ufeff' + rows.map((r) => r.map(csvEscape).join(',')).join('\r\n');
+}
+
+function printNotes() {
+  const notes = [...state.notes].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  if (!notes.length) { toast('No hay notas para exportar'); return; }
+  const school = state.settings.schoolName || 'Pastoral Escolar';
+  let html = `<h1>${esc(school)} — Ideas y notas</h1>`;
+  html += `<p>${esc(new Date().toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' }))} · ${notes.length} nota(s)</p>`;
+  html += notes.map((n) => {
+    const tags = (n.tags || []).length ? `<p class="pr-tags">${n.tags.map((t) => esc(t)).join(' · ')}</p>` : '';
+    return `<div class="pr-note"><h2>${esc(n.title || 'Sin título')}</h2>${tags}<div class="pr-body">${esc(n.body || '').replace(/\n/g, '<br />')}</div></div>`;
+  }).join('');
+  $('#print-area').innerHTML = html;
+  window.print();
+}
+
+function exportNotesCsv() {
+  if (!state.notes.length) { toast('No hay notas para exportar'); return; }
+  const rows = [['Título', 'Etiquetas', 'Contenido', 'Creada', 'Actualizada']];
+  [...state.notes].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')).forEach((n) => {
+    rows.push([n.title || '', (n.tags || []).join(' '), n.body || '', n.createdAt || '', n.updatedAt || '']);
+  });
+  downloadFile('notas-pastoral.csv', toCsv(rows), 'text/csv;charset=utf-8');
+  toast('Notas exportadas a CSV');
+}
+
+function printCommunity() {
+  const school = state.settings.schoolName || 'Pastoral Escolar';
+  let html = `<h1>${esc(school)} — Comunidad</h1>`;
+  html += `<p>${esc(new Date().toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' }))}</p>`;
+  html += '<h2>Grupos</h2>';
+  html += state.groups.length ? state.groups.map((g) => `<div class="pr-item"><span class="pr-date">${esc(g.name)}</span>${g.leader ? ' · ' + esc(g.leader) : ''}${g.description ? ' — ' + esc(g.description) : ''}</div>`).join('') : '<p>No hay grupos.</p>';
+  html += '<h2>Personas</h2>';
+  html += state.persons.length ? state.persons.map((p) => `<div class="pr-item"><span class="pr-date">${esc(p.name)}</span>${p.role ? ' · ' + esc(p.role) : ''}${p.group ? ' · ' + esc(p.group) : ''}${p.contact ? ' · ' + esc(p.contact) : ''}${p.notes ? ' — ' + esc(p.notes) : ''}</div>`).join('') : '<p>No hay personas.</p>';
+  $('#print-area').innerHTML = html;
+  window.print();
+}
+
+function exportCommunityCsv() {
+  if (!state.groups.length && !state.persons.length) { toast('No hay datos de comunidad para exportar'); return; }
+  const rows = [['Tipo', 'Nombre', 'Rol', 'Grupo', 'Contacto', 'Notas', 'Coordinador/a', 'Descripción']];
+  state.groups.forEach((g) => rows.push(['Grupo', g.name || '', '', '', '', '', g.leader || '', g.description || '']));
+  state.persons.forEach((p) => rows.push(['Persona', p.name || '', p.role || '', p.group || '', p.contact || '', p.notes || '', '', '']));
+  downloadFile('comunidad-pastoral.csv', toCsv(rows), 'text/csv;charset=utf-8');
+  toast('Comunidad exportada a CSV');
+}
+
+/* ------------------------------------------------------------
+   Pantalla de inicio (bienvenida) y de ida (despedida)
+   ------------------------------------------------------------ */
+const WELCOME_VERSES = [
+  { t: 'El Señor es mi pastor; nada me faltará.', r: 'Salmo 23, 1' },
+  { t: 'Todo lo puedo en Cristo que me fortalece.', r: 'Filipenses 4, 13' },
+  { t: 'La paz os dejo, mi paz os doy.', r: 'Juan 14, 27' },
+  { t: 'Venid a mí todos los que estáis cansados y agobiados, y yo os aliviaré.', r: 'Mateo 11, 28' },
+  { t: 'Donde dos o tres están reunidos en mi nombre, allí estoy yo en medio de ellos.', r: 'Mateo 18, 20' },
+  { t: 'El que permanece en mí y yo en él, ese da mucho fruto.', r: 'Juan 15, 5' },
+  { t: 'Confía en el Señor de todo corazón y no te apoyes en tu propia inteligencia.', r: 'Proverbios 3, 5' },
+  { t: 'Sed fuertes y valientes; no temáis, porque el Señor tu Dios está contigo.', r: 'Josué 1, 9' },
+  { t: 'Lámpara es tu palabra para mis pasos, luz en mi sendero.', r: 'Salmo 119, 105' },
+  { t: 'La alegría del Señor es vuestra fuerza.', r: 'Nehemías 8, 10' },
+  { t: 'Permaneced en mi amor.', r: 'Juan 15, 9' },
+  { t: 'Bienaventurados los que trabajan por la paz, porque serán llamados hijos de Dios.', r: 'Mateo 5, 9' }
+];
+
+const GOODBYE_VERSES = [
+  { t: 'Id por todo el mundo y anunciad el Evangelio.', r: 'Marcos 16, 15' },
+  { t: 'Vete en paz.', r: 'Lucas 7, 50' },
+  { t: 'La paz de Dios, que supera todo entendimiento, guardará vuestros corazones.', r: 'Filipenses 4, 7' },
+  { t: 'El Señor te bendiga y te guarde.', r: 'Números 6, 24' },
+  { t: 'Que el Dios de la esperanza os llene de toda alegría y paz.', r: 'Romanos 15, 13' },
+  { t: 'Encomienda al Señor tu camino; confía en él, y él actuará.', r: 'Salmo 37, 5' }
+];
+
+function dailyIndex(len, salt) {
+  const key = toKey(new Date()) + (salt || '');
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 100000;
+  return h % len;
+}
+
+function pickVerse(list, salt) { return list[dailyIndex(list.length, salt)]; }
+
+function renderVerse(verse, textSel, refSel) {
+  const t = $(textSel), r = $(refSel);
+  if (t) t.textContent = '«' + verse.t + '»';
+  if (r) r.textContent = '— ' + verse.r;
+}
+
+function showWelcome() {
+  const el = $('#welcome');
+  if (!el) return;
+  if (state.settings.showWelcome === false) { el.classList.add('hidden'); return; }
+  const now = new Date();
+  $('#welcome-school').textContent = state.settings.schoolName || 'Pastoral Escolar';
+  const name = state.settings.pastorName ? ', ' + state.settings.pastorName : '';
+  const hour = now.getHours();
+  const greet = hour < 12 ? 'Buenos días' : hour < 19 ? 'Buenas tardes' : 'Buenas noches';
+  $('#welcome-greet').textContent = `${greet}${name}. La paz sea contigo.`;
+  const dateEl = $('#welcome-date');
+  dateEl.textContent = now.toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const lit = liturgicalInfo(toKey(now));
+  const litEl = $('#welcome-lit');
+  litEl.textContent = lit.season + (lit.feast && lit.feast !== 'Domingo' ? ' · ' + lit.feast : '');
+  litEl.style.borderLeftColor = lit.color;
+  litEl.classList.remove('hidden');
+  renderVerse(pickVerse(WELCOME_VERSES, 'welcome'), '#welcome-verse-text', '#welcome-verse-ref');
+  $('#welcome-dont-show').checked = false;
+  el.classList.remove('hidden', 'closing');
+}
+
+function hideWelcome() {
+  const el = $('#welcome');
+  if (!el || el.classList.contains('hidden') || el.classList.contains('closing')) return;
+  if ($('#welcome-dont-show').checked) {
+    state.settings.showWelcome = false;
+    const s = $('#set-welcome');
+    if (s) s.checked = false;
+    persist();
+  }
+  el.classList.add('closing');
+  setTimeout(() => el.classList.add('hidden'), 460);
+}
+
+let closingInProgress = false;
+function showGoodbye() {
+  if (closingInProgress) return;
+  closingInProgress = true;
+  const el = $('#goodbye');
+  const v = pickVerse(GOODBYE_VERSES, 'goodbye');
+  renderVerse(v, '#goodbye-verse-text', '#goodbye-verse-ref');
+  const sub = $('#goodbye-sub');
+  if (sub) sub.textContent = 'Gracias por tu labor' + (state.settings.pastorName ? ', ' + state.settings.pastorName : '') + '. Que el Señor te acompañe y te guarde.';
+  if (!el) { api.confirmQuit(); return; }
+  el.classList.remove('hidden');
+  const bar = $('#goodbye-bar');
+  if (bar) { bar.classList.remove('run'); void bar.offsetWidth; bar.classList.add('run'); }
+  setTimeout(() => api.confirmQuit(), 6200);
 }
 
 /* ------------------------------------------------------------
@@ -1095,6 +1927,23 @@ function bindEvents() {
 
     const summary = e.target.closest('[data-summary]');
     if (summary) { weeklySummary(); return; }
+
+    const copyBtn = e.target.closest('[data-copy]');
+    if (copyBtn) {
+      const m = state.chat[Number(copyBtn.dataset.copy)];
+      if (m) copyText(m.content);
+      return;
+    }
+
+    const regenBtn = e.target.closest('[data-regen]');
+    if (regenBtn) { regenerate(); return; }
+
+    const rmAttach = e.target.closest('[data-attach-remove]');
+    if (rmAttach) {
+      ui.attached.splice(Number(rmAttach.dataset.attachRemove), 1);
+      renderAttachments();
+      return;
+    }
 
     const sr = e.target.closest('[data-sr]');
     if (sr) { openSearchResult((ui.searchShown || [])[Number(sr.dataset.sr)]); return; }
@@ -1164,6 +2013,13 @@ function bindEvents() {
   $('#events-ics').addEventListener('click', exportIcs);
   $('#events-print').addEventListener('click', printAgenda);
 
+  // Exportar notas y comunidad
+  $('#notes-image').addEventListener('click', noteFromImage);
+  $('#notes-print').addEventListener('click', printNotes);
+  $('#notes-csv').addEventListener('click', exportNotesCsv);
+  $('#community-print').addEventListener('click', printCommunity);
+  $('#community-csv').addEventListener('click', exportCommunityCsv);
+
   $$('#task-filter .seg').forEach((b) => b.addEventListener('click', () => {
     ui.taskFilter = b.dataset.f;
     $$('#task-filter .seg').forEach((x) => x.classList.toggle('active', x === b));
@@ -1195,11 +2051,34 @@ function bindEvents() {
     e.target.style.height = 'auto';
     e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
   });
+  $('#chat-attach').addEventListener('click', () => $('#chat-file').click());
+  $('#chat-file').addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    for (const f of files) await addAttachment(f);
+    e.target.value = '';
+  });
+  $('#chat-text').addEventListener('paste', async (e) => {
+    const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+    const imgs = items.filter((it) => it.type && it.type.startsWith('image/'));
+    if (!imgs.length) return;
+    e.preventDefault();
+    for (const it of imgs) {
+      const f = it.getAsFile();
+      if (f) await addAttachment(f);
+    }
+  });
   $$('#chat-suggest button').forEach((b) => {
     if (b.dataset.summary) return;
     b.addEventListener('click', () => sendChat(b.dataset.prompt));
   });
-  $('#chat-clear').addEventListener('click', async () => { state.chat = []; await persist(); renderChat(); });
+  $('#chat-clear').addEventListener('click', async () => { state.chat = []; clearAttachments(); await persist(); renderChat(); });
+  $('#chat-stop').addEventListener('click', () => {
+    if (!ui.chatBusy) return;
+    ui.chatCanceled = true;
+    setThinkingStage('stopping');
+    if (ui.chatRequestId) api.aiCancel(ui.chatRequestId);
+  });
+  api.onAiStream(handleAiStream);
 
   // Settings / IA
   $('#btn-install').addEventListener('click', () => installAi(!!aiMgr.installed));
@@ -1215,8 +2094,12 @@ function bindEvents() {
     if (!confirm('¿Desinstalar la IA? Se borrarán el motor y los modelos descargados.')) return;
     await api.aiUninstall(); await refreshAiManager(); await checkAi(); toast('IA desinstalada');
   });
-  $('#chat-model').addEventListener('change', async (e) => {
-    state.settings.model = e.target.value; await persist();
+  $('#chat-mode').addEventListener('change', async (e) => {
+    state.settings.chatMode = e.target.value === 'deep' ? 'deep' : 'daily';
+    await persist();
+    updateChatModeUi();
+    updateAiUi();
+    toast(state.settings.chatMode === 'deep' ? 'Modelo: Qwen 3.5 9B (profundo)' : 'Modelo: Gemma 4 12B (diario)');
   });
   $('#set-reveal').addEventListener('click', () => api.revealData());
   $('#set-export').addEventListener('click', async () => {
@@ -1253,6 +2136,21 @@ function bindEvents() {
     await persist();
   });
 
+  // Avisos del sistema
+  $('#set-notify').addEventListener('change', async (e) => {
+    state.settings.notify = e.target.checked;
+    await persist();
+    toast(state.settings.notify ? 'Avisos del sistema activados' : 'Avisos del sistema desactivados');
+    if (state.settings.notify) checkNotifications();
+  });
+
+  // Pantalla de bienvenida
+  $('#set-welcome').addEventListener('change', async (e) => {
+    state.settings.showWelcome = e.target.checked;
+    await persist();
+    toast(state.settings.showWelcome ? 'Se mostrará la bienvenida al iniciar' : 'Bienvenida desactivada');
+  });
+
   // Guardar datos personales
   ['set-pastor', 'set-school'].forEach((id) => {
     $('#' + id).addEventListener('change', async () => {
@@ -1265,11 +2163,20 @@ function bindEvents() {
   });
 
   document.addEventListener('keydown', (e) => {
+    const w = $('#welcome');
+    if (w && !w.classList.contains('hidden') && !w.classList.contains('closing')) {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Escape') { e.preventDefault(); hideWelcome(); }
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openSearch(); return; }
     if (e.ctrlKey && e.key === 'n') { e.preventDefault(); openNote(); return; }
     if (e.key === 'Escape') { closeModal(); closeSearch(); }
     if (e.ctrlKey && e.key === 's') { e.preventDefault(); if (modalCtx) saveModal(); }
   });
+
+  // Pantalla de inicio y de ida
+  $('#welcome-enter').addEventListener('click', hideWelcome);
+  $('#goodbye-close').addEventListener('click', () => api.confirmQuit());
 }
 
 /* ------------------------------------------------------------
@@ -1280,6 +2187,8 @@ async function init() {
   mergeData(data);
   applyTheme();
   bindEvents();
+  if (api.onClosing) api.onClosing(showGoodbye);
+  showWelcome();
   api.onAiProgress(handleAiProgress);
   go('dashboard');
   checkAi();
@@ -1287,6 +2196,8 @@ async function init() {
   setInterval(checkAi, 30000);
   setInterval(refreshAiManager, 60000);
   setInterval(() => { if (ui.view === 'dashboard') renderDashboard(); }, 60000);
+  checkNotifications();
+  setInterval(checkNotifications, 60000);
 }
 
 init();
